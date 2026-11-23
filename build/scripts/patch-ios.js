@@ -37,7 +37,26 @@ PATCHES.push({
   check: 'esm',
 });
 
-// ---------------------------------------------------------------- 2. 会话压缩
+// ---------------------------------------------------------------- 2. shell 路径
+// iOS 没有 /bin/bash（Procursus 的 bash 在 /var/jb/usr/bin/bash）。
+// terminal-bash 硬编码 DEFAULT_BASH_SHELL = "/bin/bash"，
+// 不改的话终端工具直接 ENOENT。
+PATCHES.push({
+  name: 'shell 路径改为 iOS 实际位置',
+  file: '@deepseek-ai/dsh-terminal-bash/lib/index.js',
+  old: 'const DEFAULT_BASH_SHELL = "/bin/bash";',
+  new: `// dsh-iOS: iOS 的 /bin/bash 不存在，用越狱环境的 bash。
+// 优先 /var/jb/usr/bin/bash（Procursus），退到 /bin/sh。
+const DEFAULT_BASH_SHELL = (() => {
+\ttry { require("node:fs").accessSync("/var/jb/usr/bin/bash", require("node:fs").constants.X_OK); return "/var/jb/usr/bin/bash"; } catch {}
+\ttry { require("node:fs").accessSync("/bin/bash", require("node:fs").constants.X_OK); return "/bin/bash"; } catch {}
+\treturn "/bin/sh";
+})();`,
+  marker: 'dsh-iOS: iOS 的 /bin/bash 不存在',
+  check: 'cjs',
+});
+
+// ---------------------------------------------------------------- 3. 会话压缩
 // Node 22.12 之前没有 node:zlib 的 zstd 系列。用 Node 24 时原生支持，
 // 无需降级；但若会话文件要与桌面端互通则保持 zstd。这里不动。
 //

@@ -1,0 +1,8 @@
+{
+  "name": "node-pty",
+  "version": "1.0.0-ios-shim",
+  "description": "iOS 上 node-pty 的纯 JS 替代（管道模拟，非真 PTY）",
+  "main": "index.js",
+  "license": "MIT",
+  "private": true
+}

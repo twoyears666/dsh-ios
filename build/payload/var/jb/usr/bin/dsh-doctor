@@ -73,7 +73,18 @@ for c in git bash rg; do
     command -v "$c" >/dev/null 2>&1 && ok "$c 已安装" || warn "$c 缺失（功能降级）"
 done
 
-# 11) 端口
+# 11) 数据目录
+R="/var/mobile/Media/deepseek-harness"
+if [ -d "$R" ]; then
+    ok "数据目录 $R"
+    for sub in workspaces config data cache logs; do
+        [ -d "$R/$sub" ] && ok "  $sub/" || warn "  $sub/ 缺失"
+    done
+else
+    warn "数据目录 $R 不存在（首次启动会创建）"
+fi
+
+# 12) 端口
 if nc -z 127.0.0.1 "${DSH_WEB_PORT:-3080}" 2>/dev/null; then
     ok "web 端口 ${DSH_WEB_PORT:-3080} 在监听"
 else

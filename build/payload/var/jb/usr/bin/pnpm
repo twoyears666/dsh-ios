@@ -2,7 +2,7 @@
 # pnpm —— 包内纯 JS 发行版（无原生依赖）
 set -e
 D=/var/jb/usr/lib/dsh
-H="${DSH_HOME:-/var/jb/var/mobile/.dsh}"
+H="${DSH_CACHE_DIR:-/var/mobile/Media/deepseek-harness/cache}"
 NODE="${DSH_NODE:-$D/bin/node}"
 PNPM_CJS="$D/libexec/pnpm/bin/pnpm.cjs"
 

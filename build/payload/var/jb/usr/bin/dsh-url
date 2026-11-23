@@ -4,11 +4,11 @@
 # 用法：
 #   dsh-url          打印 URL
 #   dsh-url open     打印并尝试打开
-H="${DSH_HOME:-/var/jb/var/mobile/.dsh}"
+L="${DSH_LOG_DIR:-/var/mobile/Media/deepseek-harness/logs}"
 PORT="${DSH_WEB_PORT:-3080}"
 
 find_url() {
-    for f in "$H/web.log" "$H/dsh-daemon.log" "$H/dsh-daemon.err.log"; do
+    for f in "$L/web.log" "$L/dsh-daemon.log" "$L/dsh-daemon.err.log"; do
         [ -f "$f" ] || continue
         u=$(grep -o "http://[0-9.]*:[0-9]*/?token=[A-Za-z0-9_-]*" "$f" 2>/dev/null | tail -1)
         [ -n "$u" ] && { printf '%s\n' "$u"; return 0; }

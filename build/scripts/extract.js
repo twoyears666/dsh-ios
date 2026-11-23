@@ -64,7 +64,6 @@ const DROP_PACKAGES = new Set([
   '@vscode/ripgrep-darwin-x64',
   'sherpa-onnx-darwin-arm64',
   'sherpa-onnx-node',
-  'node-pty',
   '@deepseek-ai/libreoffice-kit-darwin-arm64',
   '@deepseek-ai/node-addon-system-darwin-arm64',
   '@deepseek-ai/node-addon-system-darwin-x64',
@@ -238,6 +237,12 @@ const SHIM_FILES = {
   '@vscode/ripgrep/lib/index.js': 'ripgrep-index.js',
 };
 
+// 需要整包替换成 shim 目录的包（原生 addon 的纯 JS 替代）
+const SHIM_PACKAGES = {
+  // node-pty：iOS 无 pty.node，用管道模拟
+  'node-pty': 'node-pty-ios',
+};
+
 // 注意：依赖树的根是 OUT/node_modules（dsh/node_modules），
 // 而 OUT 顶层只放 dsh 自己的 package.json / desktop-runtime.json。
 const NM_ROOT = path.join(OUT, 'node_modules');
@@ -262,6 +267,19 @@ for (const [rel, srcFile] of Object.entries(SHIM_FILES)) {
   const before = fs.existsSync(dest) ? fs.statSync(dest).size : 0;
   fs.copyFileSync(src, dest);
   stats.replaced.push(`${rel}  (${before} → ${fs.statSync(dest).size} B)`);
+}
+
+// 整包替换：把 shims/<dir> 的内容拷成 node_modules/<pkg>
+for (const [pkg, dir] of Object.entries(SHIM_PACKAGES)) {
+  const src = path.join(SHIMS_DIR, dir);
+  if (!fs.existsSync(src)) {
+    console.warn(`[extract] 跳过 ${pkg}：找不到 ${src}`);
+    continue;
+  }
+  const dest = path.join(NM_ROOT, pkg);
+  fs.rmSync(dest, { recursive: true, force: true });
+  fs.cpSync(src, dest, { recursive: true });
+  stats.replaced.push(`${pkg}  (整包替换为 ${dir})`);
 }
 
 // ---- 6. 报告 ----

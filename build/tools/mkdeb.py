@@ -123,24 +123,76 @@ def build(root: str, out: str, compression: str = "xz") -> None:
         if not os.path.isfile(os.path.join(control, req)):
             raise SystemExit(f"缺少 {control}/{req}")
 
-    # control.tar.gz 只含 DEBIAN/ 下内容，路径前缀 DEBIAN/
+    # ---- control.tar ----
+    # 规范：control.tar 里直接是 ./control、./postinst、./md5sums、./，
+    # 不带 DEBIAN/ 前缀（DEBIAN/ 只是构建目录名）。
+    # 带前缀会让 dpkg/Sileo 找不到 ./control → "could not be read"。
+    import hashlib
+
     ctrl_buf = io.BytesIO()
-    with gzip.GzipFile(fileobj=ctrl_buf, mode="wb", mtime=0, compresslevel=9) as gz:
-        with tarfile.open(fileobj=gz, mode="w", format=tarfile.GNU_FORMAT) as tf:
-            for fn in sorted(os.listdir(control)):
+    if compression == "gzip":
+        ctrl_comp = gzip.GzipFile(fileobj=ctrl_buf, mode="wb", mtime=0, compresslevel=9)
+    else:
+        ctrl_comp = lzma.LZMAFile(ctrl_buf, mode="wb", preset=9)
+
+    with ctrl_comp as comp:
+        with tarfile.open(fileobj=comp, mode="w", format=tarfile.GNU_FORMAT) as tf:
+            # 根目录项（官方 deb 有，Sileo 兼容性更好）
+            root_ti = tarfile.TarInfo(name="./")
+            root_ti.type = tarfile.DIRTYPE
+            root_ti.mode = 0o755
+            root_ti.mtime = 0
+            root_ti.uid = root_ti.gid = 0
+            root_ti.uname = "root"
+            root_ti.gname = "root"
+            tf.addfile(root_ti)
+
+            names = sorted(os.listdir(control))
+            for fn in names:
                 full = os.path.join(control, fn)
                 if not os.path.isfile(full):
                     continue
                 st = os.lstat(full)
-                ti = tarfile.TarInfo(name="./DEBIAN/" + fn)
+                ti = tarfile.TarInfo(name="./" + fn)
                 ti.mtime = 0
                 ti.uid = ti.gid = 0
                 ti.uname = "root"
-                ti.gname = "wheel"
+                ti.gname = "root"
                 ti.mode = st.st_mode & 0o7777
                 ti.size = st.st_size
                 with open(full, "rb") as fh:
                     tf.addfile(ti, fh)
+
+            # md5sums（官方 deb 都有；dpkg 用它校验完整性）
+            if "md5sums" not in names:
+                md5_lines = []
+                for dirpath, _, filenames in os.walk(root):
+                    rel_dir = os.path.relpath(dirpath, root)
+                    if rel_dir == ".":
+                        rel_dir = ""
+                    # 跳过 DEBIAN/
+                    if rel_dir == "DEBIAN" or rel_dir.startswith("DEBIAN" + os.sep):
+                        continue
+                    for f in sorted(filenames):
+                        full = os.path.join(dirpath, f)
+                        if os.path.islink(full) or not os.path.isfile(full):
+                            continue
+                        rel = (rel_dir + "/" + f) if rel_dir else f
+                        h = hashlib.md5()
+                        with open(full, "rb") as fh:
+                            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                                h.update(chunk)
+                        md5_lines.append(f"{h.hexdigest()}  {rel}")
+                md5_data = ("\n".join(md5_lines) + "\n").encode()
+                ti = tarfile.TarInfo(name="./md5sums")
+                ti.mtime = 0
+                ti.uid = ti.gid = 0
+                ti.uname = "root"
+                ti.gname = "root"
+                ti.mode = 0o644
+                ti.size = len(md5_data)
+                tf.addfile(ti, io.BytesIO(md5_data))
+
     ctrl_data = ctrl_buf.getvalue()
 
     # data.tar.* 排除 DEBIAN/

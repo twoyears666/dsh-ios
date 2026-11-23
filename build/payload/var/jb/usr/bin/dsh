@@ -25,22 +25,45 @@ fi
 [ -f "$BIN" ]  || { echo "dsh: dsh 主程序缺失：$BIN" >&2; exit 69; }
 
 export HOME="${HOME:-/var/mobile}"
-export DSH_HOME="${DSH_HOME:-$JB/var/mobile/.dsh}"
 export PATH="$JB/usr/bin:$JB/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 export NODE_PATH="$D/node_modules"
 export DSH_NODE="$NODE"
 
-mkdir -p "$DSH_HOME" 2>/dev/null || true
+# ---- 数据目录：统一放在 Media 下，卸载不丢，Finder/iTunes 可见 ----
+# /var/mobile/Media/deepseek-harness/
+#   ├── workspaces/   工作区（用户新建目录都在这）
+#   ├── config/       配置
+#   ├── data/         会话 / 附件 / 存储
+#   ├── cache/        pnpm / npm / tmp（可清理）
+#   └── logs/         日志
+DSH_ROOT="${DSH_ROOT:-/var/mobile/Media/deepseek-harness}"
+export DSH_ROOT
+export DSH_HOME="${DSH_HOME:-$DSH_ROOT/data}"
+export DSH_CONFIG_DIR="${DSH_CONFIG_DIR:-$DSH_ROOT/config}"
+export DSH_WORKSPACES_DIR="${DSH_WORKSPACES_DIR:-$DSH_ROOT/workspaces}"
+export DSH_LOG_DIR="${DSH_LOG_DIR:-$DSH_ROOT/logs}"
+export DSH_CACHE_DIR="${DSH_CACHE_DIR:-$DSH_ROOT/cache}"
 
-# pnpm 相关目录全部落到 $DSH_HOME，避免写 root 属主目录导致 EACCES
-PNPM_HOME="$DSH_HOME/pnpm";                  export PNPM_HOME
-XDG_DATA_HOME="$DSH_HOME/pnpm-data";         export XDG_DATA_HOME
-XDG_CACHE_HOME="$DSH_HOME/pnpm-cache";       export XDG_CACHE_HOME
-npm_config_cache="$DSH_HOME/npm-cache";      export npm_config_cache
-npm_config_store_dir="$DSH_HOME/pnpm/store"; export npm_config_store_dir
+for _d in "$DSH_HOME" "$DSH_CONFIG_DIR" "$DSH_WORKSPACES_DIR" "$DSH_LOG_DIR" "$DSH_CACHE_DIR"; do
+    mkdir -p "$_d" 2>/dev/null || true
+done
+
+# 配置文件：优先用 config/ 下的，兼容旧位置
+[ -f "$ENVF" ] || ENVF="$DSH_CONFIG_DIR/dsh.env"
+
+# pnpm / npm 全部落到 cache/，避免写 root 属主目录导致 EACCES
+PNPM_HOME="$DSH_CACHE_DIR/pnpm";                  export PNPM_HOME
+XDG_DATA_HOME="$DSH_CACHE_DIR/pnpm-data";         export XDG_DATA_HOME
+XDG_CACHE_HOME="$DSH_CACHE_DIR/pnpm-cache";       export XDG_CACHE_HOME
+npm_config_cache="$DSH_CACHE_DIR/npm-cache";      export npm_config_cache
+npm_config_store_dir="$DSH_CACHE_DIR/pnpm/store"; export npm_config_store_dir
 for _d in "$PNPM_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$npm_config_cache"; do
     mkdir -p "$_d" 2>/dev/null || true
 done
+
+# TMPDIR 也放到 Media 下，避免 iOS 清理系统 tmp 导致运行时文件消失
+export TMPDIR="$DSH_CACHE_DIR/tmp"
+mkdir -p "$TMPDIR" 2>/dev/null || true
 
 # 图片 shim：iOS 无 sharp，用纯 JS 头解析层替代。
 # 不加这个，老对话一发送就会因 prepareImages() 遍历历史图片而抛
@@ -60,7 +83,7 @@ fi
 case "$1" in
     web)
         mkdir -p "$DSH_HOME" 2>/dev/null || true
-        exec "$NODE" $DSH_NODE_FLAGS --expose-internals "$BIN" "$@" >>"$DSH_HOME/web.log" 2>&1
+        exec "$NODE" $DSH_NODE_FLAGS --expose-internals "$BIN" "$@" >>"$DSH_LOG_DIR/web.log" 2>&1
         ;;
     *)
         exec "$NODE" $DSH_NODE_FLAGS --expose-internals "$BIN" "$@"

@@ -1,13 +1,91 @@
 #!/bin/sh
+# postinst —— 安装后配置 + 数据迁移
 set -e
+
 JB=/var/jb
 D="$JB/usr/lib/dsh"
+ROOT=/var/mobile/Media/deepseek-harness
+OLD="$JB/var/mobile/.dsh"
 
-mkdir -p "$JB/var/mobile/.dsh"
-chown -R 501:501 "$JB/var/mobile" 2>/dev/null || true
+echo ""
+echo "=== DeepSeek Harness 安装 ==="
+
+# ---------------------------------------------------------------- 1. 建目录
+# 全部数据集中到 Media 下，卸载不丢，Finder/iTunes 可见
+mkdir -p "$ROOT/workspaces" \
+         "$ROOT/config" \
+         "$ROOT/data" \
+         "$ROOT/cache" \
+         "$ROOT/logs"
+
+# 注入 iOS 环境说明（dsh 会作为 user-global 指令自动加载）
+# AGENTS.md 随包安装在 data/ 下；若被用户删了，从模板恢复
+if [ ! -f "$ROOT/data/AGENTS.md" ] && [ -f "$D/AGENTS.md.template" ]; then
+    cp "$D/AGENTS.md.template" "$ROOT/data/AGENTS.md"
+    echo "  已恢复 AGENTS.md（iOS 环境说明）"
+fi
+
+# ---------------------------------------------------------------- 2. 数据迁移
+# 从旧路径 $JB/var/mobile/.dsh 迁到 $ROOT
+if [ -d "$OLD" ]; then
+    echo "  检测到旧数据：$OLD"
+
+    # 2.1 会话
+    if [ -d "$OLD/sessions" ] && [ -n "$(ls -A "$OLD/sessions" 2>/dev/null)" ]; then
+        if [ -z "$(ls -A "$ROOT/data/sessions" 2>/dev/null)" ]; then
+            echo "    迁移 sessions/"
+            cp -R "$OLD/sessions" "$ROOT/data/" 2>/dev/null || true
+        else
+            echo "    跳过 sessions/（新位置已有数据）"
+        fi
+    fi
+
+    # 2.2 附件
+    for d in attachments storages skills; do
+        if [ -d "$OLD/$d" ] && [ -n "$(ls -A "$OLD/$d" 2>/dev/null)" ]; then
+            if [ -z "$(ls -A "$ROOT/data/$d" 2>/dev/null)" ]; then
+                echo "    迁移 $d/"
+                cp -R "$OLD/$d" "$ROOT/data/" 2>/dev/null || true
+            fi
+        fi
+    done
+
+    # 2.3 配置
+    for f in .credentials.yaml; do
+        if [ -f "$OLD/$f" ] && [ ! -f "$ROOT/config/$f" ]; then
+            echo "    迁移 $f"
+            cp "$OLD/$f" "$ROOT/config/" 2>/dev/null || true
+        fi
+    done
+
+    # 2.4 profiles（含 cordis.patch.yml）
+    if [ -d "$OLD/profiles" ]; then
+        if [ ! -d "$ROOT/config/profiles" ]; then
+            echo "    迁移 profiles/"
+            cp -R "$OLD/profiles" "$ROOT/config/" 2>/dev/null || true
+        fi
+    fi
+
+    # 2.5 旧日志
+    for f in web.log dsh-daemon.log dsh-daemon.err.log; do
+        [ -f "$OLD/$f" ] && cp "$OLD/$f" "$ROOT/logs/$f.migrated" 2>/dev/null || true
+    done
+
+    echo "  迁移完成（旧目录保留在 $OLD，确认无误后可手动删除）"
+fi
+
+# ---------------------------------------------------------------- 3. 属主
+# mobile = uid 501。Media 目录下必须可写，否则 dsh 建不了会话
+chown -R 501:501 "$ROOT" 2>/dev/null || true
+chmod 755 "$ROOT" 2>/dev/null || true
+for sub in workspaces config data cache logs; do
+    chmod 755 "$ROOT/$sub" 2>/dev/null || true
+done
+
+# node 可执行
 [ -f "$D/bin/node" ] && chmod 755 "$D/bin/node"
 
-# 原生 App：补签 + 刷图标缓存
+# ---------------------------------------------------------------- 4. 原生 App
 APP="$JB/Applications/DSH.app"
 if [ -d "$APP" ]; then
     chmod 755 "$APP/DSH" 2>/dev/null || true
@@ -18,7 +96,7 @@ if [ -d "$APP" ]; then
     command -v uicache >/dev/null 2>&1 && uicache -p "$APP" 2>/dev/null || true
 fi
 
-# launchd 守护
+# ---------------------------------------------------------------- 5. launchd
 PLIST="$JB/Library/LaunchDaemons/com.twoyears.dsh.plist"
 if [ -f "$PLIST" ]; then
     launchctl bootout system "$PLIST" 2>/dev/null || true
@@ -26,10 +104,14 @@ if [ -f "$PLIST" ]; then
         || launchctl load -w "$PLIST" 2>/dev/null || true
 fi
 
+# ---------------------------------------------------------------- 6. 提示
 echo ""
-echo "DeepSeek Harness 已安装。"
-echo "  桌面图标: DSH（未出现则运行 uicache -a）"
-echo "  URL:      dsh-url"
-echo "  自检:     dsh-doctor"
+echo "数据目录: $ROOT"
+echo "  工作区: $ROOT/workspaces   ← 新建的项目放这里"
+echo "  配置:   $ROOT/config"
+echo "  日志:   $ROOT/logs"
+echo ""
+echo "  URL:    dsh-url"
+echo "  自检:   dsh-doctor"
 echo ""
 exit 0

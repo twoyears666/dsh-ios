@@ -1,5 +1,12 @@
 #!/bin/sh
+# prerm —— 卸载前停服务，但保留用户数据
 PLIST=/var/jb/Library/LaunchDaemons/com.twoyears.dsh.plist
 [ -f "$PLIST" ] && launchctl bootout system "$PLIST" 2>/dev/null || true
-echo "已卸载（用户数据保留在 /var/jb/var/mobile/.dsh）"
+
+echo ""
+echo "已卸载 DeepSeek Harness。"
+echo "用户数据保留在 /var/mobile/Media/deepseek-harness"
+echo "  工作区、会话、配置都在那里，重装后自动复用。"
+echo "  如需彻底清除：rm -rf /var/mobile/Media/deepseek-harness"
+echo ""
 exit 0

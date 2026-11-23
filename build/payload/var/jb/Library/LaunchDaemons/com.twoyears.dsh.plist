@@ -24,14 +24,18 @@
     <dict>
         <key>HOME</key>
         <string>/var/mobile</string>
+        <key>DSH_ROOT</key>
+        <string>/var/mobile/Media/deepseek-harness</string>
         <key>DSH_HOME</key>
-        <string>/var/jb/var/mobile/.dsh</string>
+        <string>/var/mobile/Media/deepseek-harness/data</string>
+        <key>DSH_WORKSPACES_DIR</key>
+        <string>/var/mobile/Media/deepseek-harness/workspaces</string>
         <key>PATH</key>
         <string>/var/jb/usr/bin:/var/jb/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     </dict>
     <key>StandardOutPath</key>
-    <string>/var/jb/var/mobile/.dsh/dsh-daemon.log</string>
+    <string>/var/mobile/Media/deepseek-harness/logs/dsh-daemon.log</string>
     <key>StandardErrorPath</key>
-    <string>/var/jb/var/mobile/.dsh/dsh-daemon.err.log</string>
+    <string>/var/mobile/Media/deepseek-harness/logs/dsh-daemon.err.log</string>
 </dict>
 </plist>

@@ -100,11 +100,14 @@ static BOOL DSHProbeKernel(NSString *host, NSInteger port) {
 
 @property (nonatomic, strong) NSMutableArray<NSDictionary *> *sessions;
 @property (nonatomic, assign) BOOL kernelReady;
+@property (nonatomic, assign) NSInteger kernelProbeTries;
 
 // 目录选择器回调
 @property (nonatomic, copy, nullable) void (^pendingPickCompletion)(NSString *_Nullable);
 
 // 内部方法前向声明：供 block / 后台队列调用
+- (void)probeKernelOnce;
+- (void)handleProbeResult:(BOOL)up;
 - (void)loadWithToken:(nullable NSString *)token;
 - (nullable NSString *)scrapeTokenFromLog;
 - (void)refreshSessions;
@@ -297,49 +300,51 @@ static BOOL DSHProbeKernel(NSString *host, NSInteger port) {
 #pragma mark - 内核探测
 
 - (void)startKernelWatch {
-    // 每 1.5 秒探一次，最多等 40 秒
-    // 注意：DSHProbeKernel 是同步 socket connect（最长阻塞 1 秒），
-    // 必须放到后台队列，否则会卡住主线程并可能触发 watchdog。
-    __block NSInteger tries = 0;
-    __weak typeof(self) weakSelf = self;
-
-    void (^tick)(void) = ^{
-        __strong typeof(weakSelf) self = weakSelf;
-        if (!self) return;
-
-        NSURLComponents *c = [NSURLComponents componentsWithString:self.baseURL];
-        NSString *host = c.host ?: @"127.0.0.1";
-        NSInteger port = c.port.integerValue ?: 3080;
-
-        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-            BOOL up = DSHProbeKernel(host, port);
-            dispatch_async(dispatch_get_main_queue(), ^{
-                __strong typeof(weakSelf) self = weakSelf;
-                if (!self) return;
-
-                if (up) {
-                    self.kernelReady = YES;
-                    self.statusLabel.text = @"内核已就绪，正在加载工作台…";
-                    [self loadWorkbench];
-                    return;
-                }
-
-                tries++;
-                if (tries > 26) {
-                    [self.spinner stopAnimating];
-                    self.statusLabel.text = @"dsh 内核未启动。\n请在终端运行：\n  dsh\n\n或检查 launchd：\n  launchctl list | grep twoyears";
-                    self.reloadButton.hidden = NO;
-                    return;
-                }
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
-                               dispatch_get_main_queue(), tick);
-            });
-        });
-    };
-
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), tick);
+    self.kernelProbeTries = 0;
+    [self probeKernelOnce];
 }
+
+/// 单次探测。用方法递归代替 block 自引用 —— 原来把 block 存进局部变量
+/// 再让内层 block 捕获，方法返回后 block 已释放，dispatch_after 收到 NULL，
+/// libdispatch 直接 SIGTRAP（"NULL was passed where a block should have been"）。
+- (void)probeKernelOnce {
+    NSURLComponents *c = [NSURLComponents componentsWithString:self.baseURL];
+    NSString *host = c.host ?: @"127.0.0.1";
+    NSInteger port = c.port.integerValue ?: 3080;
+
+    __weak typeof(self) weakSelf = self;
+    // DSHProbeKernel 是同步 socket connect（最长阻塞 1 秒），必须离开主线程
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        BOOL up = DSHProbeKernel(host, port);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [weakSelf handleProbeResult:up];
+        });
+    });
+}
+
+- (void)handleProbeResult:(BOOL)up {
+    if (up) {
+        self.kernelReady = YES;
+        self.statusLabel.text = @"内核已就绪，正在加载工作台…";
+        [self loadWorkbench];
+        return;
+    }
+
+    self.kernelProbeTries += 1;
+    if (self.kernelProbeTries > 26) {
+        [self.spinner stopAnimating];
+        self.statusLabel.text = @"dsh 内核未启动。\n请在终端运行：\n  dsh\n\n或检查 launchd：\n  launchctl list | grep twoyears";
+        self.reloadButton.hidden = NO;
+        return;
+    }
+
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        [weakSelf probeKernelOnce];
+    });
+}
+
 
 #pragma mark - 加载工作台
 

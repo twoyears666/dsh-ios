@@ -91,14 +91,22 @@ cp "$SRC/Info.plist" "$APP/Info.plist"
 plutil -lint "$APP/Info.plist" >/dev/null || die "Info.plist 格式错误"
 
 # ---------------------------------------------------------------- 图标
-if [ -f "$SRC/AppIcon-1024.png" ]; then
-    log "生成 AppIcon"
-    mkdir -p "$APP"
-    # iOS 14+ 单尺寸图标
-    cp "$SRC/AppIcon-1024.png" "$APP/AppIcon60x60@2x.png"
-    cp "$SRC/AppIcon-1024.png" "$APP/AppIcon60x60@3x.png"
+# 用 DSH 官方图标（从 mac 版 icon.icns 提取后按 iOS 规格缩放）
+ICONS="$SRC/icons"
+if [ -d "$ICONS" ]; then
+    log "安装图标"
+    n=0
+    for f in "$ICONS"/*.png; do
+        [ -f "$f" ] || continue
+        cp "$f" "$APP/$(basename "$f")"
+        n=$((n+1))
+    done
+    log "  已复制 $n 个图标"
+    ls -1 "$APP"/*.png 2>/dev/null | while read -r f; do
+        log "    $(basename "$f")"
+    done
 else
-    log "  无图标源文件，跳过"
+    warn "无图标源（$ICONS），App 会显示默认图标"
 fi
 
 # ---------------------------------------------------------------- 伪签
