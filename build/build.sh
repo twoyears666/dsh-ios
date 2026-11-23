@@ -563,7 +563,11 @@ chmod 755 "$ROOT/DEBIAN/prerm"
 # build.sh 内嵌的脚本与 build/payload/ 下的独立文件必须一致；
 # 这里用 payload 覆盖，确保本地构建与 CI 产出同一个包。
 log "应用 payload 权威脚本"
-cp -R "$HERE/payload/." "$ROOT/"
+# 只拷文件树和 DEBIAN 脚本，不覆盖本脚本生成的 control
+cp -R "$HERE/payload/var/." "$ROOT/var/"
+mkdir -p "$ROOT/DEBIAN"
+cp "$HERE/payload/DEBIAN/postinst" "$ROOT/DEBIAN/postinst"
+cp "$HERE/payload/DEBIAN/prerm"    "$ROOT/DEBIAN/prerm"
 chmod 755 "$ROOT/var/jb/usr/bin/dsh" "$ROOT/var/jb/usr/bin/dsh-doctor" \
           "$ROOT/var/jb/usr/bin/dsh-url" "$ROOT/var/jb/usr/bin/pnpm" 2>/dev/null || true
 chmod 644 "$ROOT/var/jb/etc/dsh/dsh.env" \

@@ -194,7 +194,13 @@ jobs:
 
           # 启动脚本 / 环境 / launchd / DEBIAN 全部来自仓库内独立文件，
           # 避免 YAML heredoc 缩进问题。
-          cp -R build/payload/. build/root/
+          # 先拷 payload 的文件树（var/jb/...），再单独拷 DEBIAN 脚本。
+          # 不整体拷 build/payload/. —— control 由 build-cli 动态生成，
+          # 不能被覆盖。
+          cp -R build/payload/var/. build/root/var/
+          mkdir -p build/root/DEBIAN
+          cp build/payload/DEBIAN/postinst build/root/DEBIAN/postinst
+          cp build/payload/DEBIAN/prerm    build/root/DEBIAN/prerm
 
           # actions/download-artifact 会丢失文件权限位（755 → 644），
           # 所以这里必须显式恢复所有可执行位，否则装到设备上无法运行。
