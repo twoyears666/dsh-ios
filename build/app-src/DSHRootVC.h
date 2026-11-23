@@ -15,6 +15,9 @@ NS_ASSUME_NONNULL_BEGIN
 /// 从 /var/jb/etc/dsh/dsh.env 或命令行读出的 token
 @property (nonatomic, copy, nullable) NSString *authToken;
 
+/// 加载（或重新加载）工作台。AppDelegate 处理 URL scheme 时调用。
+- (void)loadWorkbench;
+
 @end
 
 NS_ASSUME_NONNULL_END
