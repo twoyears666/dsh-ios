@@ -24,3 +24,4 @@ node_modules/
 # 临时
 /tmp/
 .dsh-probe/
+python-ios/
