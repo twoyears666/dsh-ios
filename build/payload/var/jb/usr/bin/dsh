@@ -91,8 +91,11 @@ if [ -f "$D/tier.sh" ]; then
         echo "     强制零 JIT 档试试： DSH_TIER=nowasm dsh" >&2
         exit 74
     fi
-    [ "$TIER_SOURCE" = "probed" ] && \
+    if [ "$TIER_SOURCE" = "probed" ]; then
         printf 'dsh: 已选定启动档位 [%s]\n' "$TIER_NAME" >&2
+    fi
+    # 启动很慢（iOS 上 20-60 秒），给用户进度提示，否则看起来像卡死
+    printf 'dsh: 正在启动（iOS 上首次启动需 20-60 秒，请耐心等待）…\n' >&2
 else
     TIER_NAME="native"; TIER_ARGS=""; TIER_SQLITE_ARGS=""
 fi
@@ -104,10 +107,41 @@ run_dsh() {
     "$NODE" $TIER_ARGS $TIER_SQLITE_ARGS $DSH_NODE_FLAGS --expose-internals "$BIN" "$@"
 }
 
+# 起 web 时：输出同时进终端和日志。
+# 之前直接 >>log 2>&1，终端什么都看不到，用户以为卡住了。
+# 用 tee 会破坏信号传递，所以这里用「重定向 + 后台 tail 回显」。
 case "$1" in
     web)
         mkdir -p "$DSH_LOG_DIR" 2>/dev/null || true
-        run_dsh "$@" >>"$DSH_LOG_DIR/web.log" 2>&1
+        LOG="$DSH_LOG_DIR/web.log"
+        # 清空旧日志（每次启动重新生成 token）
+        : >"$LOG" 2>/dev/null || true
+
+        # 后台跑 dsh，前台轮询：边输出日志边打心跳，
+        # 避免长时间无输出被误认为卡死。
+        run_dsh "$@" >>"$LOG" 2>&1 &
+        DSHPID=$!
+        WAITED=0
+        LASTSIZE=0
+        while kill -0 "$DSHPID" 2>/dev/null; do
+            sleep 2
+            WAITED=$((WAITED + 2))
+            SIZE=$(wc -c <"$LOG" 2>/dev/null || echo 0)
+            if [ "$SIZE" != "$LASTSIZE" ]; then
+                # 有新输出：打印出来
+                tail -c +$((LASTSIZE + 1)) "$LOG" 2>/dev/null
+                LASTSIZE=$SIZE
+            elif [ $((WAITED % 10)) -eq 0 ] && [ "$WAITED" -le 60 ]; then
+                printf 'dsh: 启动中… 已等待 %s 秒\n' "$WAITED" >&2
+            fi
+            # 端口起来就退出等待（服务已就绪）
+            if [ "$WAITED" -ge 4 ] && nc -z 127.0.0.1 "${DSH_WEB_PORT:-3080}" 2>/dev/null; then
+                tail -c +$((LASTSIZE + 1)) "$LOG" 2>/dev/null
+                printf 'dsh: 服务已就绪\n' >&2
+                break
+            fi
+        done
+        wait "$DSHPID" 2>/dev/null
         RC=$?
         ;;
     *)
@@ -126,6 +160,8 @@ case "$RC" in
             if [ "$1" = "web" ]; then
                 run_dsh "$@" >>"$DSH_LOG_DIR/web.log" 2>&1
                 RC=$?
+                # 把降级后的日志也回显出来
+                tail -n 30 "$DSH_LOG_DIR/web.log" 2>/dev/null || true
             else
                 run_dsh "$@"
                 RC=$?
