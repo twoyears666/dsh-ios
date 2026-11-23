@@ -15,6 +15,7 @@
 #import "DSHBridge.h"
 #import "DSHMenu.h"
 #import "DSHShell.h"
+#import "DSHBrowserBridge.h"
 
 // POSIX socket：用于内核存活探测（DSHProbeKernel）
 #import <sys/socket.h>
@@ -86,11 +87,12 @@ static BOOL DSHProbeKernel(NSString *host, NSInteger port) {
 #pragma mark - DSHRootVC
 
 @interface DSHRootVC () <WKNavigationDelegate, WKUIDelegate, UITableViewDelegate, UITableViewDataSource,
-                          DSHBridgeDelegate, UIDocumentPickerDelegate, DSHMenuDelegate>
+                          DSHBridgeDelegate, DSHBrowserBridgeDelegate, UIDocumentPickerDelegate, DSHMenuDelegate>
 
 @property (nonatomic, strong) WKWebView *webView;
 @property (nonatomic, strong) DSHBridge *bridge;
 @property (nonatomic, strong) DSHMenu *menu;
+@property (nonatomic, strong) DSHBrowserBridge *browserBridge;
 @property (nonatomic, strong) UITableView *sidebar;
 @property (nonatomic, strong) UIRefreshControl *refresh;
 @property (nonatomic, strong) UIActivityIndicatorView *spinner;
@@ -191,7 +193,12 @@ static BOOL DSHProbeKernel(NSString *host, NSInteger port) {
     self.bridge.delegate = self;
     [self.bridge attachToConfiguration:cfg];
 
+    // 侧边栏浏览器：dshDesktop.browser 协议（<webview> → 原生 WKWebView）
+    self.browserBridge = [[DSHBrowserBridge alloc] init];
+    self.browserBridge.delegate = self;
+
     self.webView = [[WKWebView alloc] initWithFrame:CGRectZero configuration:cfg];
+    [self.browserBridge attachToWebView:self.webView];
     self.webView.navigationDelegate = self;
     self.webView.UIDelegate = self;
     self.webView.allowsBackForwardNavigationGestures = YES;
@@ -656,6 +663,25 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     void (^cb)(NSString *) = self.pendingPickCompletion;
     self.pendingPickCompletion = nil;
     if (cb) cb(nil);
+}
+
+#pragma mark - DSHBrowserBridgeDelegate
+
+/// 侧边栏浏览器里 target=_blank / window.open：开成新标签
+- (void)browserBridgeOpenRequested:(NSString *)url lease:(NSString *)lease {
+    if (url.length == 0) return;
+    // 交给 web UI 自己开新标签（它监听 openTab）
+    NSString *js = [NSString stringWithFormat:
+        @"window.__dshBrowserOpenRequested && window.__dshBrowserOpenRequested(%@, %@);",
+        [self jsLiteral:lease], [self jsLiteral:url]];
+    [self.webView evaluateJavaScript:js completionHandler:nil];
+}
+
+- (NSString *)jsLiteral:(NSString *)s {
+    NSData *d = [NSJSONSerialization dataWithJSONObject:@[s ?: @""] options:0 error:NULL];
+    if (!d) return @"\"\"";
+    NSString *arr = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
+    return [arr substringWithRange:NSMakeRange(1, arr.length - 2)];
 }
 
 #pragma mark - DSHMenuDelegate
