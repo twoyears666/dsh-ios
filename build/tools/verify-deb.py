@@ -206,7 +206,7 @@ def main() -> int:
     has_app = all(f in members for f in OPTIONAL_APP)
     if has_app:
         errors += ok("原生 App 已包含")
-        app_exe = members["Applications/DSH.app/DSH"]
+        app_exe = members["var/jb/Applications/DSH.app/DSH"]
         if app_exe.mode & 0o111:
             errors += ok("DSH.app/DSH 可执行")
         else:
