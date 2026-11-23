@@ -239,6 +239,7 @@ jobs:
 
       - name: 打包 deb
         run: |
+          mkdir -p build/dist
           python3 build/tools/mkdeb.py build/root "build/dist/com.twoyears.dsh_${DSH_VERSION}+ios1_iphoneos-arm64.deb"
 
       - name: 验证 deb
