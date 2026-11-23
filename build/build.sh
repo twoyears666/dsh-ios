@@ -304,6 +304,10 @@ chmod 644 "$JB/Library/LaunchDaemons/com.twoyears.dsh.plist"
 APP_BUNDLE="$HERE/build/app/DSH.app"
 # entitlements 打进包里，供设备端 ldid 补签
 install -m 644 "$HERE/app-src/entitlements.plist" "$JB/usr/lib/dsh/entitlements.plist"
+# App 也要带一份（postinst 用它签 App）
+if [ -d "$JB/Applications/DSH.app" ]; then
+    install -m 644 "$HERE/app-src/entitlements.plist" "$JB/Applications/DSH.app/entitlements.plist"
+fi
 if [ -d "$APP_BUNDLE" ]; then
     log "  集成原生 App"
     mkdir -p "$JB/Applications"

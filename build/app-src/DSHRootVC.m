@@ -106,6 +106,7 @@ static BOOL DSHProbeKernel(NSString *host, NSInteger port) {
 @property (nonatomic, copy, nullable) void (^pendingPickCompletion)(NSString *_Nullable);
 
 // 内部方法前向声明：供 block / 后台队列调用
+- (void)ensureKernelRunning;
 - (void)probeKernelOnce;
 - (void)handleProbeResult:(BOOL)up;
 - (void)loadWithToken:(nullable NSString *)token;
@@ -301,7 +302,47 @@ static BOOL DSHProbeKernel(NSString *host, NSInteger port) {
 
 - (void)startKernelWatch {
     self.kernelProbeTries = 0;
+    // 先主动拉起内核（launchd 守护），再开始探测。
+    // 不能只等 —— 用户点开 App 就是要用，不该让他自己去终端敲 dsh。
+    [self ensureKernelRunning];
     [self probeKernelOnce];
+}
+
+/// 确保 dsh 内核在跑：先探测，没跑就通过 launchctl 拉起。
+- (void)ensureKernelRunning {
+    NSURLComponents *c = [NSURLComponents componentsWithString:self.baseURL];
+    NSString *host = c.host ?: @"127.0.0.1";
+    NSInteger port = c.port.integerValue ?: 3080;
+
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        if (DSHProbeKernel(host, port)) {
+            return;  // 已经在跑
+        }
+
+        // 1) 优先 launchctl bootstrap（launchd 守护，最干净）
+        // 2) 退到 kickstart（已注册但没跑）
+        // 3) 最后直接后台起 dsh（launchd 不可用时）
+        NSString *cmd =
+            @"launchctl bootstrap system /var/jb/Library/LaunchDaemons/com.twoyears.dsh.plist 2>/dev/null"
+             " || launchctl kickstart system/com.twoyears.dsh 2>/dev/null"
+             " || launchctl load -w /var/jb/Library/LaunchDaemons/com.twoyears.dsh.plist 2>/dev/null"
+             " || (nohup /var/jb/usr/bin/dsh web --no-open --port 3080 >/dev/null 2>&1 &)";
+
+        [DSHShell runAsync:@"/bin/sh"
+                      args:@[@"-c", cmd]
+                   timeout:20
+                completion:^(NSString *output, int status) {
+            __strong typeof(weakSelf) self = weakSelf;
+            if (!self) return;
+            NSLog(@"[dsh] ensureKernelRunning status=%d output=%@", status, output);
+            // launchd 启动有延迟，稍等再让探测循环接手
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                [self probeKernelOnce];
+            });
+        }];
+    });
 }
 
 /// 单次探测。用方法递归代替 block 自引用 —— 原来把 block 存进局部变量

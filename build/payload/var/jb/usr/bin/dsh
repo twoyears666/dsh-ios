@@ -78,14 +78,59 @@ if [ "$#" -eq 0 ]; then
     set -- web --no-open --port "${DSH_WEB_PORT:-3080}"
 fi
 
-# web 模式的输出同时写进 $DSH_HOME/web.log，供 dsh-url 抓 token。
-# 不用 tee：会破坏 exec 的信号传递和退出码。
+# ---- V8 启动档位自动探测 ----
+# iOS 的 pthread_jit_write_protect_np 是按线程生效的，V8 在后台线程编译
+# WASM（内置 undici 的 llhttp）时会写可执行页 → SIGBUS（zsh: bus error）。
+# 各机型/系统可用的档位不同，所以让设备自己试：跑 smoke.js 逐档探测，
+# 选第一个能过的，缓存到 $DSH_ROOT/.tier。
+if [ -f "$D/tier.sh" ]; then
+    . "$D/tier.sh"
+    if ! tier_select; then
+        echo "dsh: 所有 V8 启动档位都失败了。" >&2
+        echo "     node = $NODE" >&2
+        echo "     强制零 JIT 档试试： DSH_TIER=nowasm dsh" >&2
+        exit 74
+    fi
+    [ "$TIER_SOURCE" = "probed" ] && \
+        printf 'dsh: 已选定启动档位 [%s]\n' "$TIER_NAME" >&2
+else
+    TIER_NAME="native"; TIER_ARGS=""; TIER_SQLITE_ARGS=""
+fi
+
+# 拼最终参数：档位参数 + sqlite + expose-internals
+# 注意 $TIER_ARGS 故意不加引号 —— 需要拆成多个 argv
+run_dsh() {
+    # shellcheck disable=SC2086
+    "$NODE" $TIER_ARGS $TIER_SQLITE_ARGS $DSH_NODE_FLAGS --expose-internals "$BIN" "$@"
+}
+
 case "$1" in
     web)
-        mkdir -p "$DSH_HOME" 2>/dev/null || true
-        exec "$NODE" $DSH_NODE_FLAGS --expose-internals "$BIN" "$@" >>"$DSH_LOG_DIR/web.log" 2>&1
+        mkdir -p "$DSH_LOG_DIR" 2>/dev/null || true
+        run_dsh "$@" >>"$DSH_LOG_DIR/web.log" 2>&1
+        RC=$?
         ;;
     *)
-        exec "$NODE" $DSH_NODE_FLAGS --expose-internals "$BIN" "$@"
+        run_dsh "$@"
+        RC=$?
         ;;
 esac
+
+# 崩溃兜底：被 SIGBUS/SIGSEGV/SIGILL 杀死时，强制切 nowasm 重试一次
+case "$RC" in
+    132|133|134|135|136|138|139)
+        if [ "$TIER_NAME" != "nowasm" ] && [ -f "$D/tier.sh" ]; then
+            printf 'dsh: [%s] 档被信号杀死 (rc=%s)，降级到 nowasm 重试\n' "$TIER_NAME" "$RC" >&2
+            printf '%s\n' "nowasm" > "$TIER_CACHE" 2>/dev/null || true
+            TIER_ARGS=$(tier_args_for nowasm)
+            if [ "$1" = "web" ]; then
+                run_dsh "$@" >>"$DSH_LOG_DIR/web.log" 2>&1
+                RC=$?
+            else
+                run_dsh "$@"
+                RC=$?
+            fi
+        fi
+        ;;
+esac
+exit "$RC"

@@ -89,8 +89,17 @@ done
 APP="$JB/Applications/DSH.app"
 if [ -d "$APP" ]; then
     chmod 755 "$APP/DSH" 2>/dev/null || true
+    # App 必须带 no-sandbox / platform-application 才能执行 launchctl 和 dsh
     if command -v ldid >/dev/null 2>&1; then
-        ldid -S"$D/entitlements.plist" "$APP/DSH" 2>/dev/null || true
+        if [ -f "$APP/entitlements.plist" ]; then
+            ldid -S"$APP/entitlements.plist" "$APP/DSH" 2>/dev/null \
+                && echo "  App 已伪签（含 no-sandbox）" \
+                || echo "  ⚠ App 伪签失败"
+        elif [ -f "$D/entitlements.plist" ]; then
+            ldid -S"$D/entitlements.plist" "$APP/DSH" 2>/dev/null || true
+        fi
+    else
+        echo "  ⚠ 无 ldid，App 无法执行外部进程（需手动补签）"
     fi
     chown -R 501:501 "$APP" 2>/dev/null || true
     command -v uicache >/dev/null 2>&1 && uicache -p "$APP" 2>/dev/null || true

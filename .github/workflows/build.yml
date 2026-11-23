@@ -216,8 +216,11 @@ jobs:
               chmod 755 "$JB/Applications/DSH.app/DSH"
           fi
 
-          # entitlements 供设备端 ldid 补签
+          # entitlements 供设备端 ldid 补签（运行时和 App 各一份）
           install -m 644 build/app-src/entitlements.plist "$JB/usr/lib/dsh/entitlements.plist"
+          if [ -d "$JB/Applications/DSH.app" ]; then
+              install -m 644 build/app-src/entitlements.plist "$JB/Applications/DSH.app/entitlements.plist"
+          fi
 
           echo "=== payload 合并完成 ==="
           find build/root -maxdepth 3 -type d | sort
@@ -228,6 +231,8 @@ jobs:
           echo "=== 必需文件 ==="
           for f in usr/bin/dsh usr/bin/dsh-doctor usr/bin/dsh-url \
                    usr/lib/dsh/bin/node usr/lib/dsh/ios-image-shim.mjs \
+                   usr/lib/dsh/tier.sh usr/lib/dsh/smoke.js usr/lib/dsh/fetch-shim.cjs \
+                   Applications/DSH.app/entitlements.plist \
                    usr/lib/dsh/node_modules/@deepseek-ai/dsh/lib/bin.js \
                    etc/dsh/dsh.env Library/LaunchDaemons/com.twoyears.dsh.plist \
                    Applications/DSH.app/DSH Applications/DSH.app/Info.plist; do
