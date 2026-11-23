@@ -2,6 +2,7 @@
 //  DSHBrowserBridge.m
 //
 #import "DSHBrowserBridge.h"
+#import <UIKit/UIKit.h>
 
 static NSString *const kBrowserMsgHandler = @"dshBrowser";
 

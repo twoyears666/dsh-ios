@@ -6,6 +6,8 @@
 #import <netinet/in.h>
 #import <arpa/inet.h>
 #import <unistd.h>
+#import <errno.h>
+#import <string.h>
 
 static const uint16_t kDefaultPort = 3081;
 static const NSUInteger kMaxBodyBytes = 1024 * 1024;  // 1 MB
@@ -92,14 +94,14 @@ static const NSUInteger kMaxBodyBytes = 1024 * 1024;  // 1 MB
   NSMutableData *buf = [NSMutableData data];
   char chunk[4096];
   ssize_t got;
-  NSUInteger headerEnd = NSNotFound;
+  NSUInteger headerEnd = NSUIntegerMax;
   NSUInteger contentLength = 0;
 
   while ((got = read(client, chunk, sizeof(chunk))) > 0) {
     [buf appendBytes:chunk length:(NSUInteger)got];
-    if (buf.length > kMaxBodyBytes) break;
+    if (buf.length > (NSUInteger)kMaxBodyBytes) break;
 
-    if (headerEnd == NSNotFound) {
+    if (headerEnd == NSUIntegerMax) {
       NSRange r = [buf rangeOfData:[@"\r\n\r\n" dataUsingEncoding:NSUTF8StringEncoding]
                            options:0 range:NSMakeRange(0, buf.length)];
       if (r.location != NSNotFound) {
@@ -118,13 +120,13 @@ static const NSUInteger kMaxBodyBytes = 1024 * 1024;  // 1 MB
       }
     }
 
-    if (headerEnd != NSNotFound) {
+    if (headerEnd != NSUIntegerMax) {
       NSUInteger bodyLen = buf.length - headerEnd;
       if (bodyLen >= contentLength) break;
     }
   }
 
-  if (headerEnd == NSNotFound || headerEnd > buf.length) {
+  if (headerEnd == NSUIntegerMax || headerEnd > buf.length) {
     [self respond:client status:400 json:@{@"error": @"bad request"}];
     return;
   }
