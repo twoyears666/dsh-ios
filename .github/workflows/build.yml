@@ -195,11 +195,20 @@ jobs:
           # 启动脚本 / 环境 / launchd / DEBIAN 全部来自仓库内独立文件，
           # 避免 YAML heredoc 缩进问题。
           cp -R build/payload/. build/root/
+
+          # actions/download-artifact 会丢失文件权限位（755 → 644），
+          # 所以这里必须显式恢复所有可执行位，否则装到设备上无法运行。
           chmod 755 "$JB/usr/bin/dsh" "$JB/usr/bin/dsh-doctor" \
                     "$JB/usr/bin/dsh-url" "$JB/usr/bin/pnpm" 2>/dev/null || true
+          chmod 755 "$JB/usr/lib/dsh/bin/node" 2>/dev/null || true
           chmod 644 "$JB/etc/dsh/dsh.env" \
                     "$JB/Library/LaunchDaemons/com.twoyears.dsh.plist" 2>/dev/null || true
           chmod 755 build/root/DEBIAN/postinst build/root/DEBIAN/prerm 2>/dev/null || true
+
+          # 原生 App 的可执行位同样会丢
+          if [ -f "$JB/Applications/DSH.app/DSH" ]; then
+              chmod 755 "$JB/Applications/DSH.app/DSH"
+          fi
 
           # entitlements 供设备端 ldid 补签
           install -m 644 build/app-src/entitlements.plist "$JB/usr/lib/dsh/entitlements.plist"
