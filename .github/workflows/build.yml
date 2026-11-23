@@ -261,9 +261,25 @@ jobs:
           path: build/dist/*.deb
           if-no-files-found: error
 
-      - name: 发布 Release
+      # 发布到 Release：tag 推正式版，main 推滚动 latest。
+      # Release 附件可用公开 URL 下载（artifact 需要认证），
+      # 这样 CI 产物能被任意渠道取用。
+      - name: 发布 Release（tag）
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: build/dist/*.deb
           generate_release_notes: true
+
+      - name: 发布 Release（main 滚动 latest）
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest build
+          body: |
+            自动构建，来自 main 分支 ${{ github.sha }}
+            版本 ${{ env.DSH_VERSION }}
+          files: build/dist/*.deb
+          prerelease: true
+          make_latest: false
