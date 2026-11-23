@@ -7,9 +7,15 @@ build/build/
 *.deb
 *.ipa
 
-# 依赖树（由 extract.js 生成）
+# 依赖树（由 extract.js 生成，或 npm install）
 build/work/nodemodules/
 node_modules/
+
+# 但我们自己写的插件必须进版本库（CI 要用）
+!build/payload/var/jb/usr/lib/dsh/node_modules/
+!build/payload/var/jb/usr/lib/dsh/node_modules/@deepseek-ai/
+!build/payload/var/jb/usr/lib/dsh/node_modules/@deepseek-ai/dsh-tool-browser/
+!build/payload/var/jb/usr/lib/dsh/node_modules/@deepseek-ai/dsh-tool-browser/**
 
 # 系统
 .DS_Store
