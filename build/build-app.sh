@@ -73,6 +73,7 @@ SOURCES=(
     "$SRC/DSHMenu.m"
     "$SRC/DSHShell.m"
     "$SRC/DSHBrowserBridge.m"
+    "$SRC/DSHBrowserControl.m"
 )
 
 for f in "${SOURCES[@]}"; do

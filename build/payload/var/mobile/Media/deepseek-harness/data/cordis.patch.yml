@@ -1,0 +1,7 @@
+# dsh iOS 插件补丁（$DSH_HOME/cordis.patch.yml）
+#
+# agent 浏览器工具：默认不注册（插件的 when 守卫会检查标记文件）。
+# 开启：dsh-ctl browser on && dsh-ctl restart
+
+- id: tool-browser
+  name: "@deepseek-ai/dsh-tool-browser"

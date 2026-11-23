@@ -173,6 +173,40 @@ cmd_disable() {
     return 0
 }
 
+BFLAG="$ROOT/config/browser-agent.disabled"
+BENABLED="$ROOT/config/browser-agent.enabled"
+
+cmd_browser() {
+    sub="${2:-status}"
+    case "$sub" in
+        on)
+            rm -f "$BFLAG"
+            mkdir -p "$(dirname "$BENABLED")"
+            : >"$BENABLED"
+            logline "browser on"
+            say "agent 浏览器权限已开启"
+            say "可用工具：browser_open / snapshot / click / type / screenshot / eval"
+            say "（需重启内核生效：dsh-ctl restart）"
+            ;;
+        off)
+            rm -f "$BENABLED"
+            mkdir -p "$(dirname "$BFLAG")"
+            : >"$BFLAG"
+            logline "browser off"
+            say "agent 浏览器权限已关闭"
+            say "（需重启内核生效：dsh-ctl restart）"
+            ;;
+        status|*)
+            if [ -f "$BENABLED" ]; then
+                say "agent 浏览器：已开启"
+            else
+                say "agent 浏览器：已关闭（默认）"
+                say "  开启：dsh-ctl browser on"
+            fi
+            ;;
+    esac
+}
+
 case "${1:-status}" in
     status)  cmd_status ;;
     start)   cmd_start ;;
@@ -180,8 +214,9 @@ case "${1:-status}" in
     restart) cmd_restart ;;
     enable)  cmd_enable ;;
     disable) cmd_disable ;;
+    browser) cmd_browser "$@" ;;
     *)
-        say "用法: dsh-ctl {status|start|stop|restart|enable|disable}" >&2
+        say "用法: dsh-ctl {status|start|stop|restart|enable|disable|browser [on|off|status]}" >&2
         exit 2
         ;;
 esac

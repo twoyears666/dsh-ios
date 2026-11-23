@@ -16,6 +16,7 @@
 #import "DSHMenu.h"
 #import "DSHShell.h"
 #import "DSHBrowserBridge.h"
+#import "DSHBrowserControl.h"
 
 // POSIX socket：用于内核存活探测（DSHProbeKernel）
 #import <sys/socket.h>
@@ -87,12 +88,14 @@ static BOOL DSHProbeKernel(NSString *host, NSInteger port) {
 #pragma mark - DSHRootVC
 
 @interface DSHRootVC () <WKNavigationDelegate, WKUIDelegate, UITableViewDelegate, UITableViewDataSource,
-                          DSHBridgeDelegate, DSHBrowserBridgeDelegate, UIDocumentPickerDelegate, DSHMenuDelegate>
+                          DSHBridgeDelegate, DSHBrowserBridgeDelegate, DSHBrowserControlDelegate, UIDocumentPickerDelegate, DSHMenuDelegate>
 
 @property (nonatomic, strong) WKWebView *webView;
 @property (nonatomic, strong) DSHBridge *bridge;
 @property (nonatomic, strong) DSHMenu *menu;
 @property (nonatomic, strong) DSHBrowserBridge *browserBridge;
+@property (nonatomic, strong) DSHBrowserControl *browserControl;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, WKWebView *> *agentTabs;
 @property (nonatomic, strong) UITableView *sidebar;
 @property (nonatomic, strong) UIRefreshControl *refresh;
 @property (nonatomic, strong) UIActivityIndicatorView *spinner;
@@ -110,6 +113,9 @@ static BOOL DSHProbeKernel(NSString *host, NSInteger port) {
 @property (nonatomic, copy, nullable) void (^pendingPickCompletion)(NSString *_Nullable);
 
 // 内部方法前向声明：供 block / 后台队列调用
+- (void)startBrowserControlIfNeeded;
+- (nullable WKWebView *)agentTab:(nullable NSString *)tabId;
+- (WKWebView *)createAgentTabWithURL:(NSURL *)url tabId:(NSString *)tabId;
 - (void)keepAliveSwitchChanged:(UISwitch *)sw;
 - (void)ctl:(NSString *)subcommand message:(NSString *)message;
 - (void)confirmStopKernel;
@@ -164,6 +170,7 @@ static BOOL DSHProbeKernel(NSString *host, NSInteger port) {
 
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
+    [self startBrowserControlIfNeeded];
     [self loadWorkbench];
 }
 
@@ -196,6 +203,11 @@ static BOOL DSHProbeKernel(NSString *host, NSInteger port) {
     // 侧边栏浏览器：dshDesktop.browser 协议（<webview> → 原生 WKWebView）
     self.browserBridge = [[DSHBrowserBridge alloc] init];
     self.browserBridge.delegate = self;
+
+    // agent ↔ App 的浏览器控制端点（127.0.0.1:3081）
+    self.agentTabs = [NSMutableDictionary dictionary];
+    self.browserControl = [[DSHBrowserControl alloc] init];
+    self.browserControl.delegate = self;
 
     self.webView = [[WKWebView alloc] initWithFrame:CGRectZero configuration:cfg];
     [self.browserBridge attachToWebView:self.webView];
@@ -682,6 +694,224 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     if (!d) return @"\"\"";
     NSString *arr = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
     return [arr substringWithRange:NSMakeRange(1, arr.length - 2)];
+}
+
+
+#pragma mark - DSHBrowserControlDelegate（agent 操作浏览器）
+
+/// 启动控制端点（在 viewDidAppear 里调，只启动一次）
+- (void)startBrowserControlIfNeeded {
+  static BOOL started = NO;
+  if (started) return;
+  started = YES;
+  // 只在 agent 权限开启时才监听，避免无谓暴露端口
+  // 默认关闭：只有 enabled 标记存在才启动端点
+  BOOL enabled = [[NSFileManager defaultManager]
+      fileExistsAtPath:@"/var/mobile/Media/deepseek-harness/config/browser-agent.enabled"];
+  if (!enabled) {
+    NSLog(@"[dsh-browser-ctl] agent 浏览器权限已关闭，不启动端点");
+    return;
+  }
+  [self.browserControl startOnPort:3081];
+}
+
+/// 取指定 tab 的 WKWebView；tabId 为空则用第一个 agent tab
+- (nullable WKWebView *)agentTab:(nullable NSString *)tabId {
+  if (tabId.length > 0) return self.agentTabs[tabId];
+  return self.agentTabs.allValues.firstObject;
+}
+
+/// 新建一个 agent 标签（叠在主 WebView 之上，用户可见）
+- (WKWebView *)createAgentTabWithURL:(NSURL *)url tabId:(NSString *)tabId {
+  WKWebViewConfiguration *cfg = [[WKWebViewConfiguration alloc] init];
+  cfg.allowsInlineMediaPlayback = YES;
+  cfg.websiteDataStore = [WKWebsiteDataStore defaultDataStore];
+
+  WKWebView *wv = [[WKWebView alloc] initWithFrame:self.view.bounds configuration:cfg];
+  wv.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+  wv.backgroundColor = [UIColor systemBackgroundColor];
+
+  // 盖在主界面之上；用户能看见 agent 在做什么
+  [self.view addSubview:wv];
+  self.agentTabs[tabId] = wv;
+
+  [wv loadRequest:[NSURLRequest requestWithURL:url]];
+  return wv;
+}
+
+- (NSDictionary *)controlOpenURL:(NSString *)url {
+  NSURL *u = [NSURL URLWithString:url];
+  if (!u || ![u.scheme.lowercaseString hasPrefix:@"http"]) {
+    return @{ @"error": @"只支持 http/https" };
+  }
+  NSString *tabId = [[NSUUID UUID].UUIDString lowercaseString];
+  dispatch_async(dispatch_get_main_queue(), ^{
+    [self createAgentTabWithURL:u tabId:tabId];
+  });
+  // 等一小会儿让导航起步，再回标题（拿不到就返回 URL）
+  return @{ @"tabId": tabId, @"url": url, @"title": @"" };
+}
+
+- (NSDictionary *)controlSnapshotTab:(NSString *)tabId maxChars:(NSInteger)maxChars {
+  WKWebView *wv = [self agentTab:tabId];
+  if (!wv) return @{ @"error": @"没有打开的标签页" };
+
+  // 提取可见文本 + 可交互元素选择器
+  NSString *js =
+    @"(function(){"
+     "var t=document.body?document.body.innerText:'';"
+     "var els=[];"
+     "document.querySelectorAll('a,button,input,textarea,select,[role=button]').forEach(function(e,i){"
+       "if(i>200)return;"
+       "var sel=e.tagName.toLowerCase();"
+       "if(e.id)sel+='#'+e.id;"
+       "else if(e.className&&typeof e.className==='string'){"
+         "var c=e.className.trim().split(/\\s+/)[0];if(c)sel+='.'+c;}"
+       "els.push({selector:sel,tag:e.tagName.toLowerCase(),"
+         "text:(e.innerText||e.value||'').slice(0,80),type:e.type||''});"
+     "});"
+     "return JSON.stringify({url:location.href,title:document.title,text:t,interactive:els});"
+    "})();";
+
+  __block NSDictionary *out = nil;
+  dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+  dispatch_async(dispatch_get_main_queue(), ^{
+    [wv evaluateJavaScript:js completionHandler:^(id result, NSError *err) {
+      if ([result isKindOfClass:[NSString class]]) {
+        NSData *d = [(NSString *)result dataUsingEncoding:NSUTF8StringEncoding];
+        NSDictionary *j = [NSJSONSerialization JSONObjectWithData:d options:0 error:NULL];
+        if ([j isKindOfClass:[NSDictionary class]]) {
+          NSMutableDictionary *m = [j mutableCopy];
+          NSString *text = m[@"text"] ?: @"";
+          if (text.length > (NSUInteger)maxChars) {
+            m[@"text"] = [text substringToIndex:(NSUInteger)maxChars];
+            m[@"truncated"] = @YES;
+          } else {
+            m[@"truncated"] = @NO;
+          }
+          out = m;
+        }
+      }
+      dispatch_semaphore_signal(sem);
+    }];
+  });
+  dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC));
+  return out ?: @{ @"error": @"快照超时或失败" };
+}
+
+- (NSDictionary *)controlClickSelector:(NSString *)selector tab:(NSString *)tabId {
+  WKWebView *wv = [self agentTab:tabId];
+  if (!wv) return @{ @"error": @"没有打开的标签页" };
+
+  NSString *js = [NSString stringWithFormat:
+    @"(function(){var e=document.querySelector(%@);"
+     "if(!e)return JSON.stringify({clicked:false});"
+     "e.scrollIntoView({block:'center'});e.click();"
+     "return JSON.stringify({clicked:true,url:location.href,title:document.title});})();",
+    [self jsLiteral:selector]];
+
+  __block NSDictionary *out = nil;
+  dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+  dispatch_async(dispatch_get_main_queue(), ^{
+    [wv evaluateJavaScript:js completionHandler:^(id result, NSError *err) {
+      if ([result isKindOfClass:[NSString class]]) {
+        NSData *d = [(NSString *)result dataUsingEncoding:NSUTF8StringEncoding];
+        id j = [NSJSONSerialization JSONObjectWithData:d options:0 error:NULL];
+        if ([j isKindOfClass:[NSDictionary class]]) out = j;
+      }
+      dispatch_semaphore_signal(sem);
+    }];
+  });
+  dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC));
+  return out ?: @{ @"clicked": @NO };
+}
+
+- (NSDictionary *)controlTypeSelector:(NSString *)selector
+                                 text:(NSString *)text
+                               submit:(BOOL)submit
+                                  tab:(NSString *)tabId {
+  WKWebView *wv = [self agentTab:tabId];
+  if (!wv) return @{ @"error": @"没有打开的标签页" };
+
+  NSString *js = [NSString stringWithFormat:
+    @"(function(){var e=document.querySelector(%@);"
+     "if(!e)return JSON.stringify({typed:false});"
+     "e.focus();e.value=%@;"
+     "e.dispatchEvent(new Event('input',{bubbles:true}));"
+     "e.dispatchEvent(new Event('change',{bubbles:true}));"
+     "%@"
+     "return JSON.stringify({typed:true,url:location.href});})();",
+    [self jsLiteral:selector],
+    [self jsLiteral:text],
+    submit ? @"if(e.form){if(e.form.requestSubmit)e.form.requestSubmit();else e.form.submit();}"
+           : @"if(e.form&&e.form.querySelector('[type=submit]')){var b=e.form.querySelector('[type=submit]');b.click();}" ];
+
+  __block NSDictionary *out = nil;
+  dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+  dispatch_async(dispatch_get_main_queue(), ^{
+    [wv evaluateJavaScript:js completionHandler:^(id result, NSError *err) {
+      if ([result isKindOfClass:[NSString class]]) {
+        NSData *d = [(NSString *)result dataUsingEncoding:NSUTF8StringEncoding];
+        id j = [NSJSONSerialization JSONObjectWithData:d options:0 error:NULL];
+        if ([j isKindOfClass:[NSDictionary class]]) out = j;
+      }
+      dispatch_semaphore_signal(sem);
+    }];
+  });
+  dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC));
+  return out ?: @{ @"typed": @NO };
+}
+
+- (NSDictionary *)controlScreenshotTab:(NSString *)tabId {
+  WKWebView *wv = [self agentTab:tabId];
+  if (!wv) return @{ @"error": @"没有打开的标签页" };
+
+  __block NSDictionary *out = nil;
+  dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+  dispatch_async(dispatch_get_main_queue(), ^{
+    WKSnapshotConfiguration *cfg = [[WKSnapshotConfiguration alloc] init];
+    [wv takeSnapshotWithConfiguration:cfg completionHandler:^(UIImage *img, NSError *err) {
+      if (img) {
+        NSData *png = UIImagePNGRepresentation(img);
+        out = @{
+          @"mediaType": @"image/png",
+          @"data": [png base64EncodedStringWithOptions:0],
+          @"width": @((NSInteger)img.size.width),
+          @"height": @((NSInteger)img.size.height),
+        };
+      }
+      dispatch_semaphore_signal(sem);
+    }];
+  });
+  dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 15 * NSEC_PER_SEC));
+  return out ?: @{ @"error": @"截图失败" };
+}
+
+- (NSDictionary *)controlEvalExpression:(NSString *)expression tab:(NSString *)tabId {
+  WKWebView *wv = [self agentTab:tabId];
+  if (!wv) return @{ @"error": @"没有打开的标签页" };
+
+  NSString *js = [NSString stringWithFormat:
+    @"(function(){try{var v=(%@);return JSON.stringify({ok:true,result:v});}"
+     "catch(e){return JSON.stringify({ok:false,error:String(e)});}})();",
+    expression];
+
+  __block NSDictionary *out = nil;
+  dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+  dispatch_async(dispatch_get_main_queue(), ^{
+    [wv evaluateJavaScript:js completionHandler:^(id result, NSError *err) {
+      if ([result isKindOfClass:[NSString class]]) {
+        NSData *d = [(NSString *)result dataUsingEncoding:NSUTF8StringEncoding];
+        id j = [NSJSONSerialization JSONObjectWithData:d options:0 error:NULL];
+        if ([j isKindOfClass:[NSDictionary class]]) out = j;
+      } else if (err) {
+        out = @{ @"ok": @NO, @"error": err.localizedDescription ?: @"" };
+      }
+      dispatch_semaphore_signal(sem);
+    }];
+  });
+  dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC));
+  return out ?: @{ @"ok": @NO, @"error": @"执行超时" };
 }
 
 #pragma mark - DSHMenuDelegate

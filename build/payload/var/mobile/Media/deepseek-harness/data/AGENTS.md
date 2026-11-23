@@ -73,6 +73,33 @@ logs/          日志
 4. **写文件用绝对路径**：相对路径在不同工作区下行为可能不符预期
 5. **卸载安全**：用户数据在 Media 下，卸载重装不丢；但 `/var/jb` 下的东西会没
 
+## 浏览器（agent 专用，默认关闭）
+
+如果用户开启了 agent 浏览器权限，你可以操作设备上**可见的** WKWebView：
+
+| 工具 | 用途 |
+|---|---|
+| `browser_open(url)` | 打开网页（用户能看见），返回 tabId |
+| `browser_snapshot(tabId?)` | 取渲染后的正文 + 可交互元素选择器 |
+| `browser_click(selector)` | 点击元素 |
+| `browser_type(selector, text, submit?)` | 输入文本 |
+| `browser_screenshot()` | 截图（base64 PNG） |
+| `browser_eval(expression)` | 在页面里执行 JS |
+
+**和 `web_fetch` 的区别**：
+- `browser_*` 走真实浏览器，能跑 JS、保留 cookie/登录态、能看到渲染后内容
+- `web_fetch` 是纯 HTTP，快但拿不到 SPA 渲染结果、不能交互
+- `browser_*` 的操作**用户全程可见**（不是后台偷偷抓）
+
+**用法建议**：
+1. 先用 `browser_open` 打开页面
+2. `browser_snapshot` 看内容和可点元素
+3. 用返回的 selector 做 `browser_click` / `browser_type`
+4. 需要看视觉效果时用 `browser_screenshot`
+
+如果工具列表里没有 `browser_*`，说明用户没开启，**不要尝试绕过**，
+告诉用户运行 `dsh-ctl browser on && dsh-ctl restart`。
+
 ## 内核控制
 
 `dsh-ctl` 管理内核生命周期：
