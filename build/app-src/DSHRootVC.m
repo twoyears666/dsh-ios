@@ -95,6 +95,8 @@ static BOOL DSHProbeKernel(NSString *host, NSInteger port) {
 @property (nonatomic, strong) DSHMenu *menu;
 @property (nonatomic, strong) DSHBrowserBridge *browserBridge;
 @property (nonatomic, strong) DSHBrowserControl *browserControl;
+@property (nonatomic, strong) UISplitViewController *splitVC;
+@property (nonatomic, strong) UINavigationController *rightNav;
 @property (nonatomic, strong) NSMutableDictionary<NSString *, WKWebView *> *agentTabs;
 @property (nonatomic, strong) UITableView *sidebar;
 @property (nonatomic, strong) UIRefreshControl *refresh;
@@ -306,16 +308,19 @@ static BOOL DSHProbeKernel(NSString *host, NSInteger port) {
     // 导航栏右侧的"更多"菜单按钮（还原 Electron 菜单栏）
     rightVC.navigationItem.rightBarButtonItem =
         [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"ellipsis.circle"]
-                                         menu:[self.menu buildMainMenuRunning:self.kernelReady
+                                         menu:[self.menu buildMainMenuRunning:NO
                                                                     keepAlive:[self keepAliveEnabled]]];
 
     // 左侧导航栏标题
     leftVC.navigationItem.title = @"会话";
 
     UISplitViewController *split = [[UISplitViewController alloc] init];
+    UINavigationController *rightNav = [[UINavigationController alloc] initWithRootViewController:rightVC];
+    self.splitVC = split;
+    self.rightNav = rightNav;
     split.viewControllers = @[
         [[UINavigationController alloc] initWithRootViewController:leftVC],
-        [[UINavigationController alloc] initWithRootViewController:rightVC],
+        rightNav,
     ];
     split.preferredDisplayMode = UISplitViewControllerDisplayModeAllVisible;
     split.preferredPrimaryColumnWidthFraction = 0.28;
@@ -1012,26 +1017,9 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
 
 /// 重建导航栏菜单，反映最新状态
 - (void)refreshMenu {
-    UINavigationController *nav = (UINavigationController *)self.children.firstObject;
-    UIViewController *right = nil;
-    if ([nav isKindOfClass:[UISplitViewController class]]) {
-        UISplitViewController *split = (UISplitViewController *)nav;
-        if (split.viewControllers.count > 1) {
-            right = split.viewControllers[1];
-        }
-    }
-    if (!right) {
-        // 从 split 里找
-        for (UIViewController *child in self.children) {
-            if ([child isKindOfClass:[UISplitViewController class]]) {
-                UISplitViewController *sp = (UISplitViewController *)child;
-                if (sp.viewControllers.count > 1) right = sp.viewControllers[1];
-                break;
-            }
-        }
-    }
-    UINavigationController *rightNav = [right isKindOfClass:[UINavigationController class]]
-        ? (UINavigationController *)right : nil;
+    // 直接用手上持有的右栏 nav，不去遍历 childViewControllers
+    UINavigationController *rightNav = self.rightNav;
+    if (!rightNav) return;
     rightNav.topViewController.navigationItem.rightBarButtonItem =
         [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"ellipsis.circle"]
                                          menu:[self.menu buildMainMenuRunning:self.kernelReady
