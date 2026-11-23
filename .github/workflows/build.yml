@@ -1,0 +1,253 @@
+name: Build dsh-ios
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dsh_version:
+        description: 'DSH 版本'
+        required: false
+        default: '0.2.2-rc.5'
+
+permissions:
+  contents: write
+
+env:
+  DSH_VERSION: ${{ github.event.inputs.dsh_version || '0.2.2-rc.5' }}
+  NODE_IOS_URL: https://github.com/yitenchen123/dsh-ios/releases/download/node24-exp/node-v24.19.0-iphoneos-arm64-jit
+  NODE_IOS_SHA: 8bebb2a2e45824f9880ac99141ce0ee9359ec4fad72ccd1ef27bcd1341d77697
+
+jobs:
+  # ==========================================================================
+  # 1. 编译原生 App（macOS runner 自带 iOS SDK）
+  # ==========================================================================
+  build-app:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 检查 iOS SDK
+        run: |
+          xcodebuild -version
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          echo "SDK: $SDK"
+          echo "版本: $(xcrun --sdk iphoneos --show-sdk-version)"
+          test -d "$SDK" || { echo "iOS SDK 不可用"; exit 1; }
+
+      - name: 安装 ldid
+        run: brew install ldid || echo "(ldid 安装失败，postinst 会补签)"
+
+      - name: 编译 DSH.app
+        run: |
+          chmod +x build/build-app.sh
+          bash build/build-app.sh build/app
+
+      - name: 校验产物
+        run: |
+          APP=build/app/DSH.app
+          test -f "$APP/DSH"       || { echo "❌ 可执行文件缺失"; exit 1; }
+          test -f "$APP/Info.plist" || { echo "❌ Info.plist 缺失"; exit 1; }
+          plutil -lint "$APP/Info.plist"
+          file "$APP/DSH"
+          du -sh "$APP"
+          # 确认是 iOS 平台（内联，避免 heredoc 缩进问题）
+          python3 -c "import struct,sys; b=open('$APP/DSH','rb').read(8192); assert struct.unpack('<I',b[:4])[0]==0xfeedfacf, 'not Mach-O'; assert struct.unpack('<i',b[4:8])[0]==0x0100000c, 'not arm64'; n=struct.unpack('<I',b[16:20])[0]; off=32; plat=None; exec('for _ in range(n):\n cmd,sz=struct.unpack(\'<II\',b[off:off+8])\n if cmd==0x32: plat=struct.unpack(\'<I\',b[off+8:off+12])[0]\n off+=sz\n if off>len(b): break'); print(f'platform={plat}'); sys.exit(0 if plat==2 else 1)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dsh-app
+          path: build/app/DSH.app
+          if-no-files-found: error
+
+  # ==========================================================================
+  # 2. 构建 CLI + 依赖树（ubuntu，用 Python 生成 deb）
+  # ==========================================================================
+  build-cli:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: 下载 node iOS 运行时
+        run: |
+          mkdir -p build/work/dl
+          curl -sSL --retry 3 -m 1800 -o build/work/dl/node24-ios "$NODE_IOS_URL"
+          echo "$NODE_IOS_SHA  build/work/dl/node24-ios" | sha256sum -c -
+
+      - name: 校验 node 是 iOS 平台
+        run: |
+          python3 -c "import struct,sys; b=open('build/work/dl/node24-ios','rb').read(8192); assert struct.unpack('<I',b[:4])[0]==0xfeedfacf; n=struct.unpack('<I',b[16:20])[0]; off=32; plat=None; exec('for _ in range(n):\n cmd,sz=struct.unpack(\'<II\',b[off:off+8])\n if cmd==0x32: plat=struct.unpack(\'<I\',b[off+8:off+12])[0]\n off+=sz\n if off>len(b): break'); print(f'platform={plat}'); sys.exit(0 if plat==2 else 1)"
+
+      - name: 获取 dsh 依赖树
+        run: |
+          mkdir -p build/work/npm
+          cd build/work/npm
+          echo '{"name":"dsh-ios-bundle","private":true,"version":"1.0.0"}' > package.json
+          # --ignore-scripts 必须：koffi 的 postinstall 会尝试编译原生模块
+          npm install --omit=optional --ignore-scripts --no-audit --no-fund --loglevel=error \
+            "@deepseek-ai/dsh@${DSH_VERSION}"
+          echo "包数: $(ls node_modules | wc -l)"
+
+      - name: 应用纯 JS shim
+        run: |
+          NM=build/work/npm/node_modules
+          cp build/shims/node-addon-system__flock.js         "$NM/@deepseek-ai/node-addon-system/lib/flock.js"
+          cp build/shims/node-addon-require-builtin__index.js "$NM/node-addon-require-builtin/lib/index.js"
+          cp build/shims/ripgrep-index.js                    "$NM/@vscode/ripgrep/lib/index.js"
+          echo "已替换 3 个 shim"
+
+      - name: 裁剪依赖树
+        run: |
+          NM=build/work/npm/node_modules
+          find "$NM" -type f \( -name '*.node' -o -name '*.d.ts' -o -name '*.map' \
+            -o -name '*.d.cts' -o -name '*.d.mts' \) -delete 2>/dev/null || true
+          find "$NM" -type d \( -name test -o -name tests -o -name __tests__ \
+            -o -name docs -o -name .github -o -name prebuilds \) \
+            -prune -exec rm -rf {} + 2>/dev/null || true
+          find "$NM" -type f \( -iname 'readme*' -o -iname 'changelog*' -o -iname '*.md' \) -delete 2>/dev/null || true
+          rm -rf "$NM"/@img "$NM"/@koromix "$NM"/sherpa-onnx-* "$NM"/node-pty \
+                 "$NM"/@deepseek-ai/libreoffice-kit-darwin-* \
+                 "$NM"/@deepseek-ai/node-addon-system-*-* \
+                 "$NM"/node-addon-require-builtin-*-* 2>/dev/null || true
+          N=$(find "$NM" -name '*.node' | wc -l)
+          echo "剩余 .node: $N"
+          test "$N" = "0" || { echo "❌ 仍有原生模块"; exit 1; }
+          du -sh "$NM"
+
+      - name: 打 iOS 补丁
+        run: node build/scripts/patch-ios.js build/work/npm/node_modules
+
+      - name: 组装 payload
+        run: |
+          JB=build/root/var/jb
+          mkdir -p "$JB/usr/lib/dsh/bin" "$JB/usr/bin" "$JB/etc/dsh" \
+                   "$JB/Library/LaunchDaemons" "$JB/var/mobile" "$JB/Applications"
+          install -m 755 build/work/dl/node24-ios "$JB/usr/lib/dsh/bin/node"
+          cp -R build/work/npm/node_modules "$JB/usr/lib/dsh/"
+          install -m 644 build/shims/ios-image-shim.mjs "$JB/usr/lib/dsh/ios-image-shim.mjs"
+          find "$JB" -name '*.node' -delete
+
+      - name: 生成 DEBIAN 控制文件
+        run: |
+          mkdir -p build/root/DEBIAN
+          SIZE=$(du -sk build/root | awk '{print $1}')
+          SIZE=$(du -sk build/root | awk '{print $1}')
+          {
+            printf 'Package: com.twoyears.dsh\n'
+            printf 'Name: DeepSeek Harness\n'
+            printf 'Version: %s+ios1\n' "${DSH_VERSION}"
+            printf 'Architecture: iphoneos-arm64\n'
+            printf 'Section: Development\n'
+            printf 'Priority: optional\n'
+            printf 'Maintainer: twoyears <noreply@localhost>\n'
+            printf 'Installed-Size: %s\n' "$SIZE"
+            printf 'Depends: firmware (>= 14.0), ca-certificates, uikittools, libiosexec1\n'
+            printf 'Recommends: git, ripgrep, bash\n'
+            printf 'Suggests: openssh-server\n'
+            printf 'Description: DeepSeek Harness for rootless jailbroken iOS\n'
+            printf ' Self-contained runtime: Node.js 24.19.0 (iOS arm64) plus the full\n'
+            printf ' @deepseek-ai/dsh dependency tree with native addons replaced by\n'
+            printf ' pure-JS shims. Includes the native UIKit shell app.\n'
+          } > build/root/DEBIAN/control
+          chmod 755 build/root/DEBIAN
+          cat build/root/DEBIAN/control
+          chmod 755 build/root/DEBIAN
+          cat build/root/DEBIAN/control
+
+      - name: 上传 CLI 载荷
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-cli-root
+          path: build/root
+
+  # ==========================================================================
+  # 3. 合并 CLI + GUI，产出最终 deb
+  # ==========================================================================
+  package:
+    needs: [build-cli, build-app]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: dsh-cli-root
+          path: build/root
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: dsh-app
+          path: build/root/var/jb/Applications/DSH.app
+
+      - name: 合并 payload
+        run: |
+          JB=build/root/var/jb
+          mkdir -p "$JB/Applications" "$JB/usr/bin" "$JB/etc/dsh" \
+                   "$JB/Library/LaunchDaemons" "$JB/var/mobile"
+
+          # 启动脚本 / 环境 / launchd / DEBIAN 全部来自仓库内独立文件，
+          # 避免 YAML heredoc 缩进问题。
+          cp -R build/payload/. build/root/
+          chmod 755 "$JB/usr/bin/dsh" "$JB/usr/bin/dsh-doctor" \
+                    "$JB/usr/bin/dsh-url" "$JB/usr/bin/pnpm" 2>/dev/null || true
+          chmod 644 "$JB/etc/dsh/dsh.env" \
+                    "$JB/Library/LaunchDaemons/com.twoyears.dsh.plist" 2>/dev/null || true
+          chmod 755 build/root/DEBIAN/postinst build/root/DEBIAN/prerm 2>/dev/null || true
+
+          # entitlements 供设备端 ldid 补签
+          install -m 644 build/app-src/entitlements.plist "$JB/usr/lib/dsh/entitlements.plist"
+
+          echo "=== payload 合并完成 ==="
+          find build/root -maxdepth 3 -type d | sort
+
+      - name: 校验最终载荷
+        run: |
+          JB=build/root/var/jb
+          echo "=== 必需文件 ==="
+          for f in usr/bin/dsh usr/bin/dsh-doctor usr/bin/dsh-url \
+                   usr/lib/dsh/bin/node usr/lib/dsh/ios-image-shim.mjs \
+                   usr/lib/dsh/node_modules/@deepseek-ai/dsh/lib/bin.js \
+                   etc/dsh/dsh.env Library/LaunchDaemons/com.twoyears.dsh.plist \
+                   Applications/DSH.app/DSH Applications/DSH.app/Info.plist; do
+              if [ -e "$JB/$f" ]; then echo "  ✅ $f"; else echo "  ❌ $f"; exit 1; fi
+          done
+          echo "=== 零原生模块 ==="
+          N=$(find "$JB" -name '*.node' -o -name '*.dylib' | wc -l)
+          echo "  .node/.dylib: $N"
+          test "$N" = "0" || exit 1
+          echo "=== 可执行位 ==="
+          for f in usr/bin/dsh usr/bin/dsh-doctor usr/bin/dsh-url usr/lib/dsh/bin/node Applications/DSH.app/DSH; do
+              test -x "$JB/$f" || { echo "  ❌ $f 不可执行"; exit 1; }
+              echo "  ✅ $f"
+          done
+
+      - name: 打包 deb
+        run: |
+          python3 build/tools/mkdeb.py build/root "build/dist/com.twoyears.dsh_${DSH_VERSION}+ios1_iphoneos-arm64.deb"
+
+      - name: 验证 deb
+        run: |
+          DEB=$(ls build/dist/*.deb)
+          echo "产物: $DEB"
+          ls -lh "$DEB"
+          python3 build/tools/verify-deb.py "$DEB"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dsh-ios-deb
+          path: build/dist/*.deb
+          if-no-files-found: error
+
+      - name: 发布 Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/dist/*.deb
+          generate_release_notes: true

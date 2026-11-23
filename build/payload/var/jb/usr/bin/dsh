@@ -1,0 +1,68 @@
+#!/bin/sh
+# dsh —— DeepSeek Harness 入口（rootless /var/jb）
+#
+# 关键：必须带 --expose-internals。
+# node-addon-require-builtin 的纯 JS shim 靠它 require() Node 私有内部模块
+# （internal/modules/*），没有这个参数 dsh-app-boot 会在 host preparation 阶段抛错。
+set -e
+
+JB=/var/jb
+D="$JB/usr/lib/dsh"
+NODE="${DSH_NODE:-$D/bin/node}"
+BIN="$D/node_modules/@deepseek-ai/dsh/lib/bin.js"
+ENVF="$JB/etc/dsh/dsh.env"
+
+[ -f "$ENVF" ] && . "$ENVF"
+
+# 越狱态门禁：/var/jb 是符号链接，重启后 target 可能消失
+if [ ! -L "$JB" ] && [ ! -d "$JB" ]; then
+    echo "dsh: /var/jb 不存在，越狱未激活。" >&2
+    echo "     请打开 Dopamine 点一次 Jailbreak，再回来重试。" >&2
+    exit 78
+fi
+
+[ -x "$NODE" ] || { echo "dsh: node 运行时缺失：$NODE" >&2; exit 69; }
+[ -f "$BIN" ]  || { echo "dsh: dsh 主程序缺失：$BIN" >&2; exit 69; }
+
+export HOME="${HOME:-/var/mobile}"
+export DSH_HOME="${DSH_HOME:-$JB/var/mobile/.dsh}"
+export PATH="$JB/usr/bin:$JB/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export NODE_PATH="$D/node_modules"
+export DSH_NODE="$NODE"
+
+mkdir -p "$DSH_HOME" 2>/dev/null || true
+
+# pnpm 相关目录全部落到 $DSH_HOME，避免写 root 属主目录导致 EACCES
+PNPM_HOME="$DSH_HOME/pnpm";                  export PNPM_HOME
+XDG_DATA_HOME="$DSH_HOME/pnpm-data";         export XDG_DATA_HOME
+XDG_CACHE_HOME="$DSH_HOME/pnpm-cache";       export XDG_CACHE_HOME
+npm_config_cache="$DSH_HOME/npm-cache";      export npm_config_cache
+npm_config_store_dir="$DSH_HOME/pnpm/store"; export npm_config_store_dir
+for _d in "$PNPM_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$npm_config_cache"; do
+    mkdir -p "$_d" 2>/dev/null || true
+done
+
+# 图片 shim：iOS 无 sharp，用纯 JS 头解析层替代。
+# 不加这个，老对话一发送就会因 prepareImages() 遍历历史图片而抛
+# LlmError("DeepSeek Messages transport failed","TRANSPORT")，前端 5/5 重试全失败。
+IMG_SHIM="$D/ios-image-shim.mjs"
+if [ -f "$IMG_SHIM" ]; then
+    DSH_NODE_FLAGS="$DSH_NODE_FLAGS --import $IMG_SHIM"
+fi
+
+# 无参数 = 起 web profile，不开浏览器（iOS 无 xdg-open）
+if [ "$#" -eq 0 ]; then
+    set -- web --no-open --port "${DSH_WEB_PORT:-3080}"
+fi
+
+# web 模式的输出同时写进 $DSH_HOME/web.log，供 dsh-url 抓 token。
+# 不用 tee：会破坏 exec 的信号传递和退出码。
+case "$1" in
+    web)
+        mkdir -p "$DSH_HOME" 2>/dev/null || true
+        exec "$NODE" $DSH_NODE_FLAGS --expose-internals "$BIN" "$@" >>"$DSH_HOME/web.log" 2>&1
+        ;;
+    *)
+        exec "$NODE" $DSH_NODE_FLAGS --expose-internals "$BIN" "$@"
+        ;;
+esac

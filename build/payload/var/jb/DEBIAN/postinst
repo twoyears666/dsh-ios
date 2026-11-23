@@ -1,0 +1,35 @@
+#!/bin/sh
+set -e
+JB=/var/jb
+D="$JB/usr/lib/dsh"
+
+mkdir -p "$JB/var/mobile/.dsh"
+chown -R 501:501 "$JB/var/mobile" 2>/dev/null || true
+[ -f "$D/bin/node" ] && chmod 755 "$D/bin/node"
+
+# 原生 App：补签 + 刷图标缓存
+APP="$JB/Applications/DSH.app"
+if [ -d "$APP" ]; then
+    chmod 755 "$APP/DSH" 2>/dev/null || true
+    if command -v ldid >/dev/null 2>&1; then
+        ldid -S"$D/entitlements.plist" "$APP/DSH" 2>/dev/null || true
+    fi
+    chown -R 501:501 "$APP" 2>/dev/null || true
+    command -v uicache >/dev/null 2>&1 && uicache -p "$APP" 2>/dev/null || true
+fi
+
+# launchd 守护
+PLIST="$JB/Library/LaunchDaemons/com.twoyears.dsh.plist"
+if [ -f "$PLIST" ]; then
+    launchctl bootout system "$PLIST" 2>/dev/null || true
+    launchctl bootstrap system "$PLIST" 2>/dev/null \
+        || launchctl load -w "$PLIST" 2>/dev/null || true
+fi
+
+echo ""
+echo "DeepSeek Harness 已安装。"
+echo "  桌面图标: DSH（未出现则运行 uicache -a）"
+echo "  URL:      dsh-url"
+echo "  自检:     dsh-doctor"
+echo ""
+exit 0

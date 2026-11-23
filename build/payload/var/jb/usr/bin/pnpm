@@ -1,0 +1,20 @@
+#!/bin/sh
+# pnpm —— 包内纯 JS 发行版（无原生依赖）
+set -e
+D=/var/jb/usr/lib/dsh
+H="${DSH_HOME:-/var/jb/var/mobile/.dsh}"
+NODE="${DSH_NODE:-$D/bin/node}"
+PNPM_CJS="$D/libexec/pnpm/bin/pnpm.cjs"
+
+[ -f "$PNPM_CJS" ] || { echo "pnpm: 未安装（$PNPM_CJS 缺失）" >&2; exit 69; }
+
+PNPM_HOME="$H/pnpm";                  export PNPM_HOME
+XDG_DATA_HOME="$H/pnpm-data";         export XDG_DATA_HOME
+XDG_CACHE_HOME="$H/pnpm-cache";       export XDG_CACHE_HOME
+npm_config_cache="$H/npm-cache";      export npm_config_cache
+npm_config_store_dir="$H/pnpm/store"; export npm_config_store_dir
+for d in "$PNPM_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$npm_config_cache"; do
+    mkdir -p "$d" 2>/dev/null || true
+done
+
+exec "$NODE" --expose-internals "$PNPM_CJS" "$@"

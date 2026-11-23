@@ -1,0 +1,5 @@
+#!/bin/sh
+PLIST=/var/jb/Library/LaunchDaemons/com.twoyears.dsh.plist
+[ -f "$PLIST" ] && launchctl bootout system "$PLIST" 2>/dev/null || true
+echo "已卸载（用户数据保留在 /var/jb/var/mobile/.dsh）"
+exit 0

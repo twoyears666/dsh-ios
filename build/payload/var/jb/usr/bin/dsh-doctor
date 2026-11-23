@@ -1,0 +1,85 @@
+#!/bin/sh
+# dsh-doctor —— 安装后自检
+D=/var/jb/usr/lib/dsh
+NODE="${DSH_NODE:-$D/bin/node}"
+OK=0
+FAIL=0
+
+ok()   { printf '  \033[32mOK\033[0m   %s\n' "$1"; OK=$((OK+1)); }
+fail() { printf '  \033[31mFAIL\033[0m %s\n' "$1"; FAIL=$((FAIL+1)); }
+warn() { printf '  \033[33mWARN\033[0m %s\n' "$1"; }
+
+echo "=== dsh-doctor ==="
+
+# 1) 越狱态
+[ -d /var/jb ] && ok "/var/jb 存在" || fail "/var/jb 不存在"
+
+# 2) node
+if [ -x "$NODE" ]; then
+    V=$("$NODE" -v 2>/dev/null || echo "?")
+    ok "node 可执行（$V）"
+    case "$V" in
+        v24.*|v25.*|v26.*) ok "node 版本满足 >= 24.9.0" ;;
+        *) fail "node 版本过低（需 >= 24.9.0）" ;;
+    esac
+else
+    fail "node 缺失：$NODE"
+fi
+
+# 3) 主程序
+[ -f "$D/node_modules/@deepseek-ai/dsh/lib/bin.js" ] && ok "dsh 主程序存在" || fail "dsh 主程序缺失"
+
+# 4) 零原生 addon
+N=$(find "$D" -name '*.node' 2>/dev/null | wc -l | tr -d ' ')
+[ "$N" = "0" ] && ok "0 个 .node" || fail "发现 $N 个 .node"
+
+# 5) 三个 shim
+grep -q 'dsh-iOS shim' "$D/node_modules/@deepseek-ai/node-addon-system/lib/flock.js" 2>/dev/null \
+    && ok "flock shim 已生效" || fail "flock shim 未生效"
+grep -q 'dsh-iOS shim' "$D/node_modules/node-addon-require-builtin/lib/index.js" 2>/dev/null \
+    && ok "require-builtin shim 已生效" || fail "require-builtin shim 未生效"
+[ -f "$D/ios-image-shim.mjs" ] && ok "图片 shim 存在" || fail "图片 shim 缺失"
+
+# 6) internal modules（shim 的核心能力）
+if [ -x "$NODE" ]; then
+    if "$NODE" --expose-internals -e '
+        const {createRequire}=require("node:module");
+        const r=createRequire(process.cwd()+"/x.js");
+        r("internal/modules/esm/loader");
+    ' >/dev/null 2>&1; then
+        ok "internal modules 可加载"
+    else
+        fail "internal modules 不可加载"
+    fi
+fi
+
+# 7) 目录选择器补丁
+if grep -q 'dsh-iOS: iOS 报 darwin' \
+     "$D/node_modules/@deepseek-ai/dsh-host-directory-picker-auto/lib/index.js" 2>/dev/null; then
+    ok "目录选择器已改 browse 后端"
+else
+    warn "目录选择器补丁未应用"
+fi
+
+# 8) 原生 App
+[ -d /var/jb/Applications/DSH.app ] && ok "原生 App 已安装" || warn "原生 App 未安装（只有 CLI）"
+
+# 9) launchd
+[ -f /var/jb/Library/LaunchDaemons/com.twoyears.dsh.plist ] \
+    && ok "launchd plist 存在" || warn "launchd plist 缺失"
+
+# 10) 外部 CLI
+for c in git bash rg; do
+    command -v "$c" >/dev/null 2>&1 && ok "$c 已安装" || warn "$c 缺失（功能降级）"
+done
+
+# 11) 端口
+if nc -z 127.0.0.1 "${DSH_WEB_PORT:-3080}" 2>/dev/null; then
+    ok "web 端口 ${DSH_WEB_PORT:-3080} 在监听"
+else
+    warn "web 端口未监听（内核可能未启动）"
+fi
+
+echo
+printf '汇总: \033[32m%d OK\033[0m / \033[31m%d FAIL\033[0m\n' "$OK" "$FAIL"
+[ "$FAIL" -eq 0 ] || exit 1

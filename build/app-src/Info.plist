@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleDisplayName</key>
+    <string>DeepSeek Harness</string>
+    <key>CFBundleExecutable</key>
+    <string>DSH</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.twoyears.dsh</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>DSH</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.2.2</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSRequiresIPhoneOS</key>
+    <true/>
+    <key>MinimumOSVersion</key>
+    <string>14.0</string>
+
+    <key>UILaunchScreen</key>
+    <dict>
+        <key>UIColorName</key>
+        <string></string>
+    </dict>
+
+    <key>UISupportedInterfaceOrientations</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
+    </array>
+    <key>UISupportedInterfaceOrientations~ipad</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+        <string>UIInterfaceOrientationPortraitUpsideDown</string>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
+    </array>
+
+    <key>UIFileSharingEnabled</key>
+    <true/>
+    <key>LSSupportsOpeningDocumentsInPlace</key>
+    <true/>
+
+    <!-- URL scheme：可用 dsh:// 或 twodsh:// 直接唤起 App。
+         在未 respring / 未刷图标缓存时，用 open 命令可直接启动。 -->
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>com.twoyears.dsh</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>dsh</string>
+                <string>twodsh</string>
+            </array>
+        </dict>
+    </array>
+
+    <!-- ATS：允许访问本地 dsh 内核（http://127.0.0.1:3080） -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+        <key>NSExceptionDomains</key>
+        <dict>
+            <key>127.0.0.1</key>
+            <dict>
+                <key>NSExceptionAllowsInsecureHTTPLoads</key>
+                <true/>
+                <key>NSIncludesSubdomains</key>
+                <true/>
+            </dict>
+            <key>localhost</key>
+            <dict>
+                <key>NSExceptionAllowsInsecureHTTPLoads</key>
+                <true/>
+                <key>NSIncludesSubdomains</key>
+                <true/>
+            </dict>
+        </dict>
+    </dict>
+
+    <!-- 越狱环境下需要读 /var/jb 下的文件 -->
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>连接本机运行的 DeepSeek Harness 内核</string>
+</dict>
+</plist>

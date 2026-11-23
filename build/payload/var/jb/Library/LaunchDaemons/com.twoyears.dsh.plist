@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.twoyears.dsh</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/var/jb/usr/bin/dsh</string>
+        <string>web</string>
+        <string>--no-open</string>
+        <string>--port</string>
+        <string>3080</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>UserName</key>
+    <string>mobile</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/var/mobile</string>
+        <key>DSH_HOME</key>
+        <string>/var/jb/var/mobile/.dsh</string>
+        <key>PATH</key>
+        <string>/var/jb/usr/bin:/var/jb/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/var/jb/var/mobile/.dsh/dsh-daemon.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/jb/var/mobile/.dsh/dsh-daemon.err.log</string>
+</dict>
+</plist>

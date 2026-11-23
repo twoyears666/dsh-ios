@@ -1,0 +1,20 @@
+# 构建产物
+build/work/
+build/root/
+build/dist/*.deb
+build/bundles/*.tar.gz
+build/build/
+*.deb
+*.ipa
+
+# 依赖树（由 extract.js 生成）
+build/work/nodemodules/
+node_modules/
+
+# 系统
+.DS_Store
+*.log
+
+# 临时
+/tmp/
+.dsh-probe/

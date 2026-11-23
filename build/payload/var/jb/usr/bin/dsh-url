@@ -1,0 +1,41 @@
+#!/bin/sh
+# dsh-url —— 打印当前 dsh web 的完整访问 URL（含 token）
+#
+# 用法：
+#   dsh-url          打印 URL
+#   dsh-url open     打印并尝试打开
+H="${DSH_HOME:-/var/jb/var/mobile/.dsh}"
+PORT="${DSH_WEB_PORT:-3080}"
+
+find_url() {
+    for f in "$H/web.log" "$H/dsh-daemon.log" "$H/dsh-daemon.err.log"; do
+        [ -f "$f" ] || continue
+        u=$(grep -o "http://[0-9.]*:[0-9]*/?token=[A-Za-z0-9_-]*" "$f" 2>/dev/null | tail -1)
+        [ -n "$u" ] && { printf '%s\n' "$u"; return 0; }
+    done
+    return 1
+}
+
+URL=$(find_url)
+if [ -z "$URL" ]; then
+    if nc -z 127.0.0.1 "$PORT" 2>/dev/null; then
+        echo "dsh 在 $PORT 上运行，但日志里找不到 token。" >&2
+        echo "重启内核以重新打印 token：" >&2
+        echo "  launchctl kickstart -k system/com.twoyears.dsh" >&2
+    else
+        echo "dsh 未运行。先启动：" >&2
+        echo "  launchctl kickstart system/com.twoyears.dsh" >&2
+        echo "  或前台： dsh" >&2
+    fi
+    exit 1
+fi
+
+case "${1:-}" in
+    open)
+        printf '%s\n' "$URL"
+        command -v uiopen >/dev/null 2>&1 && uiopen "$URL" 2>/dev/null && exit 0
+        command -v open   >/dev/null 2>&1 && open   "$URL" 2>/dev/null && exit 0
+        echo "(请手动复制上面的 URL 到 Safari)" >&2
+        ;;
+    *) printf '%s\n' "$URL" ;;
+esac
