@@ -73,9 +73,26 @@ logs/          日志
 4. **写文件用绝对路径**：相对路径在不同工作区下行为可能不符预期
 5. **卸载安全**：用户数据在 Media 下，卸载重装不丢；但 `/var/jb` 下的东西会没
 
+## 内核控制
+
+`dsh-ctl` 管理内核生命周期：
+
+```sh
+dsh-ctl status      # 查看状态（运行中/保活/launchd/URL）
+dsh-ctl start       # 启动
+dsh-ctl stop        # 停止（同时关掉保活，防止被拉起）
+dsh-ctl restart     # 重启（不改变保活设置）
+dsh-ctl enable      # 开启后台保活（开机自启 + 崩溃自动拉起）
+dsh-ctl disable     # 关闭保活（不阻止手动启动）
+```
+
+**注意**：`dsh-ctl stop` 会关闭保活。只重启请用 `dsh-ctl restart`。
+
+App 里也有触控入口：右上角菜单 → 内核 → 启动/停止/重启/保活开关。
+加载界面还有个「后台保活」开关。
+
 ## 调试
 
 - 日志：`/var/mobile/Media/deepseek-harness/logs/`
 - 自检：`dsh-doctor`
 - URL：`dsh-url`
-- 内核重启：`launchctl kickstart -k system/com.twoyears.dsh`

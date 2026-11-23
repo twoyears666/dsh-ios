@@ -84,7 +84,19 @@ else
     warn "数据目录 $R 不存在（首次启动会创建）"
 fi
 
-# 12) 端口
+# 12) 内核控制
+if [ -x /var/jb/usr/bin/dsh-ctl ]; then
+    ok "dsh-ctl 已安装"
+else
+    warn "dsh-ctl 缺失"
+fi
+if [ -f /var/mobile/Media/deepseek-harness/config/keepalive.disabled ]; then
+    warn "后台保活已关闭（dsh-ctl enable 开启）"
+else
+    ok "后台保活已开启"
+fi
+
+# 13) 端口
 if nc -z 127.0.0.1 "${DSH_WEB_PORT:-3080}" 2>/dev/null; then
     ok "web 端口 ${DSH_WEB_PORT:-3080} 在监听"
 else

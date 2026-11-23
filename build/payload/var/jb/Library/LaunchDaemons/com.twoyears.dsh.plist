@@ -14,8 +14,18 @@
     </array>
     <key>RunAtLoad</key>
     <true/>
+    <!--
+      保活策略：只在「异常退出」时拉起，正常停止不复活。
+      用 SuccessfulExit=false 而不是无条件 true：
+        - 崩溃 / 被信号杀死 → 拉起
+        - 正常退出（exit 0，例如 dsh-ctl stop 触发）→ 不拉起
+      用户彻底关闭用 dsh-ctl stop（会 bootout 卸载，根本不触发本规则）。
+    -->
     <key>KeepAlive</key>
-    <true/>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
     <key>ThrottleInterval</key>
     <integer>10</integer>
     <key>UserName</key>

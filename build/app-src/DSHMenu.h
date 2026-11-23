@@ -20,6 +20,9 @@ typedef NS_ENUM(NSInteger, DSHMenuAction) {
     DSHMenuActionSettings,
     DSHMenuActionDoctor,
     DSHMenuActionRestartKernel,
+    DSHMenuActionStartKernel,
+    DSHMenuActionStopKernel,
+    DSHMenuActionToggleKeepAlive,
     DSHMenuActionAbout,
 };
 
@@ -32,7 +35,9 @@ typedef NS_ENUM(NSInteger, DSHMenuAction) {
 @property (nonatomic, weak, nullable) id<DSHMenuDelegate> delegate;
 
 /// 构造右侧导航栏的"更多"菜单
-- (UIMenu *)buildMainMenu;
+/// @param running   内核是否在跑
+/// @param keepAlive 保活是否开启
+- (UIMenu *)buildMainMenuRunning:(BOOL)running keepAlive:(BOOL)keepAlive;
 /// 构造会话单元格的上下文菜单
 - (UIMenu *)buildContextMenuForSession:(NSString *)sessionName;
 

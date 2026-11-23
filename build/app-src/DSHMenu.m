@@ -21,6 +21,11 @@
 }
 
 - (UIMenu *)buildMainMenu {
+    // 兼容旧调用：默认按「运行中 + 保活开启」
+    return [self buildMainMenuRunning:YES keepAlive:YES];
+}
+
+- (UIMenu *)buildMainMenuRunning:(BOOL)running keepAlive:(BOOL)keepAlive {
     UIMenu *session = [UIMenu menuWithTitle:@"会话"
                                      image:[UIImage systemImageNamed:@"bubble.left.and.bubble.right"]
                                 identifier:nil
@@ -45,7 +50,16 @@
                                identifier:nil
                                   options:UIMenuOptionsDisplayInline
                                  children:@[
+        // 启动 / 停止：按当前状态只显示可用的那个
+        running
+            ? [self action:@"停止内核" image:@"stop.circle" act:DSHMenuActionStopKernel disabled:NO]
+            : [self action:@"启动内核" image:@"play.circle" act:DSHMenuActionStartKernel disabled:NO],
         [self action:@"重启内核" image:@"arrow.triangle.2.circlepath" act:DSHMenuActionRestartKernel disabled:NO],
+        // 保活开关：标题随状态变化
+        [self action:(keepAlive ? @"关闭后台保活" : @"开启后台保活")
+                image:(keepAlive ? @"moon.zzz" : @"bolt.circle")
+                  act:DSHMenuActionToggleKeepAlive
+             disabled:NO],
         [self action:@"运行自检" image:@"stethoscope" act:DSHMenuActionDoctor disabled:NO],
         [self action:@"设置" image:@"gearshape" act:DSHMenuActionSettings disabled:NO],
     ]];

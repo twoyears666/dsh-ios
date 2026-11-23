@@ -1,0 +1,187 @@
+#!/bin/sh
+# dsh-ctl —— 内核控制（启动 / 停止 / 重启 / 状态 / 保活开关）
+#
+# 用法：
+#   dsh-ctl status      查看状态
+#   dsh-ctl start       启动内核
+#   dsh-ctl stop        停止内核（并关掉保活，防止被拉起）
+#   dsh-ctl restart     重启内核
+#   dsh-ctl enable      开启保活（开机自启 + 崩溃自动拉起）
+#   dsh-ctl disable     关闭保活（不阻止手动启动）
+#
+# 保活状态由 launchd 的 disabled 覆盖标记决定：
+#   /var/jb/var/db/launchd.db 里 com.twoyears.dsh 的 Disabled 字段
+# 这里用 launchctl enable/disable + 文件标记双重记录，避免状态漂移。
+
+set -u
+
+JB=/var/jb
+D="$JB/usr/lib/dsh"
+ROOT=/var/mobile/Media/deepseek-harness
+LABEL=com.twoyears.dsh
+PLIST="$JB/Library/LaunchDaemons/$LABEL.plist"
+FLAG="$ROOT/config/keepalive.disabled"
+LOG="$ROOT/logs/ctl.log"
+
+mkdir -p "$(dirname "$FLAG")" "$ROOT/logs" 2>/dev/null || true
+
+say() { printf '%s\n' "$*"; }
+logline() { printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >>"$LOG" 2>/dev/null || true; }
+
+port() {
+    # 从 dsh.env 读端口，默认 3080
+    p=""
+    [ -f "$JB/etc/dsh/dsh.env" ] && p=$(sed -n 's/.*DSH_WEB_PORT:=\([0-9]*\).*/\1/p' "$JB/etc/dsh/dsh.env" | head -1)
+    printf '%s' "${p:-3080}"
+}
+
+is_running() {
+    # 端口能连上就算在跑（不依赖 launchd 内部状态）
+    nc -z 127.0.0.1 "$(port)" 2>/dev/null
+}
+
+launchd_loaded() {
+    launchctl print "system/$LABEL" >/dev/null 2>&1
+}
+
+cmd_status() {
+    P=$(port)
+    say "=== dsh 状态 ==="
+    if is_running; then
+        say "  内核:    运行中（端口 $P）"
+    else
+        say "  内核:    未运行"
+    fi
+
+    if [ -f "$FLAG" ]; then
+        say "  保活:    已关闭（不会被自动拉起）"
+    else
+        say "  保活:    已开启（开机自启 + 崩溃自动拉起）"
+    fi
+
+    if launchd_loaded; then
+        say "  launchd: 已注册"
+    else
+        say "  launchd: 未注册"
+    fi
+
+    if [ -f "$ROOT/logs/web.log" ]; then
+        U=$(grep -o "http://[0-9.]*:[0-9]*/?token=[A-Za-z0-9_-]*" "$ROOT/logs/web.log" 2>/dev/null | tail -1)
+        [ -n "$U" ] && say "  URL:     $U"
+    fi
+    return 0
+}
+
+cmd_start() {
+    if is_running; then
+        say "内核已在运行（端口 $(port)）"
+        return 0
+    fi
+
+    logline "start"
+    # 1) 已注册：kickstart 最干净
+    if launchd_loaded; then
+        launchctl kickstart "system/$LABEL" 2>/dev/null && { say "已启动（launchd）"; return 0; }
+    fi
+    # 2) 未注册：bootstrap
+    if [ -f "$PLIST" ]; then
+        launchctl bootstrap system "$PLIST" 2>/dev/null \
+            || launchctl load -w "$PLIST" 2>/dev/null
+        if launchd_loaded; then
+            say "已启动（launchd bootstrap）"
+            return 0
+        fi
+    fi
+    # 3) launchd 不可用：直接后台起
+    if [ -x "$JB/usr/bin/dsh" ]; then
+        mkdir -p "$ROOT/logs"
+        (nohup "$JB/usr/bin/dsh" web --no-open --port "$(port)" >>"$ROOT/logs/web.log" 2>&1 &)
+        sleep 2
+        if is_running; then
+            say "已启动（后台进程，无 launchd 守护）"
+            return 0
+        fi
+    fi
+    say "启动失败，看日志：$ROOT/logs/web.log" >&2
+    return 1
+}
+
+cmd_stop() {
+    logline "stop"
+    # 先关保活，否则 launchd 会立刻拉起
+    if [ ! -f "$FLAG" ]; then
+        mkdir -p "$(dirname "$FLAG")"
+        : >"$FLAG"
+        say "已关闭保活"
+    fi
+    launchctl disable "system/$LABEL" 2>/dev/null || true
+
+    if launchd_loaded; then
+        launchctl bootout "system/$LABEL" 2>/dev/null || \
+            launchctl unload "$PLIST" 2>/dev/null || true
+        say "已停止（launchd 已卸载）"
+    fi
+
+    # 兜底：杀掉残留进程
+    pkill -f "$D/node_modules/@deepseek-ai/dsh/lib/bin.js" 2>/dev/null || true
+
+    sleep 1
+    if is_running; then
+        say "⚠ 端口 $(port) 仍在监听，可能有其它实例" >&2
+        return 1
+    fi
+    say "内核已停止"
+    return 0
+}
+
+cmd_restart() {
+    logline "restart"
+    was_disabled=0
+    [ -f "$FLAG" ] && was_disabled=1
+
+    cmd_stop >/dev/null 2>&1 || true
+
+    # 重启不应改变保活设置：如果原来是开启的，恢复
+    if [ "$was_disabled" -eq 0 ]; then
+        rm -f "$FLAG" 2>/dev/null || true
+        launchctl enable "system/$LABEL" 2>/dev/null || true
+    fi
+
+    cmd_start
+}
+
+cmd_enable() {
+    logline "enable"
+    rm -f "$FLAG" 2>/dev/null || true
+    launchctl enable "system/$LABEL" 2>/dev/null || true
+    say "保活已开启：开机自启 + 崩溃自动拉起"
+
+    # 若当前没跑，顺手拉起来
+    if ! is_running; then
+        cmd_start
+    fi
+    return 0
+}
+
+cmd_disable() {
+    logline "disable"
+    mkdir -p "$(dirname "$FLAG")"
+    : >"$FLAG"
+    launchctl disable "system/$LABEL" 2>/dev/null || true
+    say "保活已关闭：崩溃后不会自动拉起，但仍可手动 dsh-ctl start"
+    say "（当前内核未停止；如需停止用 dsh-ctl stop）"
+    return 0
+}
+
+case "${1:-status}" in
+    status)  cmd_status ;;
+    start)   cmd_start ;;
+    stop)    cmd_stop ;;
+    restart) cmd_restart ;;
+    enable)  cmd_enable ;;
+    disable) cmd_disable ;;
+    *)
+        say "用法: dsh-ctl {status|start|stop|restart|enable|disable}" >&2
+        exit 2
+        ;;
+esac

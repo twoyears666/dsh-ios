@@ -96,6 +96,8 @@ static BOOL DSHProbeKernel(NSString *host, NSInteger port) {
 @property (nonatomic, strong) UIActivityIndicatorView *spinner;
 @property (nonatomic, strong) UILabel *statusLabel;
 @property (nonatomic, strong) UIButton *reloadButton;
+@property (nonatomic, strong) UISwitch *keepAliveSwitch;
+@property (nonatomic, strong) UILabel *keepAliveLabel;
 @property (nonatomic, strong) UIView *loadingOverlay;
 
 @property (nonatomic, strong) NSMutableArray<NSDictionary *> *sessions;
@@ -106,6 +108,11 @@ static BOOL DSHProbeKernel(NSString *host, NSInteger port) {
 @property (nonatomic, copy, nullable) void (^pendingPickCompletion)(NSString *_Nullable);
 
 // 内部方法前向声明：供 block / 后台队列调用
+- (void)keepAliveSwitchChanged:(UISwitch *)sw;
+- (void)ctl:(NSString *)subcommand message:(NSString *)message;
+- (void)confirmStopKernel;
+- (void)refreshMenu;
+- (BOOL)keepAliveEnabled;
 - (void)ensureKernelRunning;
 - (void)probeKernelOnce;
 - (void)handleProbeResult:(BOOL)up;
@@ -210,7 +217,20 @@ static BOOL DSHProbeKernel(NSString *host, NSInteger port) {
     [self.reloadButton addTarget:self action:@selector(loadWorkbench) forControlEvents:UIControlEventTouchUpInside];
     self.reloadButton.hidden = YES;
 
-    for (UIView *v in @[self.spinner, self.statusLabel, self.reloadButton]) {
+    // 保活开关：放在错误/加载界面，用户点得到
+    self.keepAliveSwitch = [[UISwitch alloc] init];
+    self.keepAliveSwitch.on = [self keepAliveEnabled];
+    [self.keepAliveSwitch addTarget:self
+                             action:@selector(keepAliveSwitchChanged:)
+                   forControlEvents:UIControlEventValueChanged];
+
+    self.keepAliveLabel = [[UILabel alloc] init];
+    self.keepAliveLabel.text = @"后台保活";
+    self.keepAliveLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
+    self.keepAliveLabel.textColor = [UIColor secondaryLabelColor];
+
+    for (UIView *v in @[self.spinner, self.statusLabel, self.reloadButton,
+                        self.keepAliveSwitch, self.keepAliveLabel]) {
         v.translatesAutoresizingMaskIntoConstraints = NO;
         [self.loadingOverlay addSubview:v];
     }
@@ -227,6 +247,12 @@ static BOOL DSHProbeKernel(NSString *host, NSInteger port) {
         [self.reloadButton.centerXAnchor constraintEqualToAnchor:safe.centerXAnchor],
         [self.reloadButton.widthAnchor constraintEqualToConstant:120],
         [self.reloadButton.heightAnchor constraintEqualToConstant:44],
+
+        [self.keepAliveSwitch.centerXAnchor constraintEqualToAnchor:safe.centerXAnchor constant:34],
+        [self.keepAliveSwitch.topAnchor constraintEqualToAnchor:self.reloadButton.bottomAnchor constant:24],
+
+        [self.keepAliveLabel.trailingAnchor constraintEqualToAnchor:self.keepAliveSwitch.leadingAnchor constant:-10],
+        [self.keepAliveLabel.centerYAnchor constraintEqualToAnchor:self.keepAliveSwitch.centerYAnchor],
     ]];
 
     // ---- UISplitViewController（iPad / iPhone 自适应）----
@@ -261,7 +287,8 @@ static BOOL DSHProbeKernel(NSString *host, NSInteger port) {
     // 导航栏右侧的"更多"菜单按钮（还原 Electron 菜单栏）
     rightVC.navigationItem.rightBarButtonItem =
         [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"ellipsis.circle"]
-                                         menu:[self.menu buildMainMenu]];
+                                         menu:[self.menu buildMainMenuRunning:self.kernelReady
+                                                                    keepAlive:[self keepAliveEnabled]]];
 
     // 左侧导航栏标题
     leftVC.navigationItem.title = @"会话";
@@ -689,6 +716,21 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
             [self restartKernel];
             break;
 
+        case DSHMenuActionStartKernel:
+            [self ctl:@"start" message:@"正在启动内核…"];
+            break;
+
+        case DSHMenuActionStopKernel:
+            [self confirmStopKernel];
+            break;
+
+        case DSHMenuActionToggleKeepAlive: {
+            BOOL on = [self keepAliveEnabled];
+            [self ctl:(on ? @"disable" : @"enable")
+              message:(on ? @"正在关闭保活…" : @"正在开启保活…")];
+            break;
+        }
+
         case DSHMenuActionAbout: {
             NSString *ver = [[NSBundle mainBundle]
                              objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?";
@@ -705,6 +747,40 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
 }
 
 #pragma mark - 辅助
+
+/// 保活是否开启（读 dsh-ctl 写的标记文件）
+- (BOOL)keepAliveEnabled {
+    return ![[NSFileManager defaultManager]
+             fileExistsAtPath:@"/var/mobile/Media/deepseek-harness/config/keepalive.disabled"];
+}
+
+/// 重建导航栏菜单，反映最新状态
+- (void)refreshMenu {
+    UINavigationController *nav = (UINavigationController *)self.children.firstObject;
+    UIViewController *right = nil;
+    if ([nav isKindOfClass:[UISplitViewController class]]) {
+        UISplitViewController *split = (UISplitViewController *)nav;
+        if (split.viewControllers.count > 1) {
+            right = split.viewControllers[1];
+        }
+    }
+    if (!right) {
+        // 从 split 里找
+        for (UIViewController *child in self.children) {
+            if ([child isKindOfClass:[UISplitViewController class]]) {
+                UISplitViewController *sp = (UISplitViewController *)child;
+                if (sp.viewControllers.count > 1) right = sp.viewControllers[1];
+                break;
+            }
+        }
+    }
+    UINavigationController *rightNav = [right isKindOfClass:[UINavigationController class]]
+        ? (UINavigationController *)right : nil;
+    rightNav.topViewController.navigationItem.rightBarButtonItem =
+        [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"ellipsis.circle"]
+                                         menu:[self.menu buildMainMenuRunning:self.kernelReady
+                                                                    keepAlive:[self keepAliveEnabled]]];
+}
 
 - (nullable NSString *)currentURLString {
     return self.webView.URL.absoluteString;
@@ -734,6 +810,51 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
         [a addAction:[UIAlertAction actionWithTitle:@"关闭" style:UIAlertActionStyleCancel handler:nil]];
         [self presentViewController:a animated:YES completion:nil];
     }];
+}
+
+/// 保活开关变化
+- (void)keepAliveSwitchChanged:(UISwitch *)sw {
+    [self ctl:(sw.on ? @"enable" : @"disable")
+      message:(sw.on ? @"正在开启保活…" : @"正在关闭保活…")];
+}
+
+/// 调用 dsh-ctl 子命令，完成后刷新状态
+- (void)ctl:(NSString *)subcommand message:(NSString *)message {
+    [self toast:message];
+    __weak typeof(self) weakSelf = self;
+    [DSHShell runAsync:@"/var/jb/usr/bin/dsh-ctl"
+                  args:@[subcommand]
+               timeout:30
+            completion:^(NSString *output, int status) {
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self) return;
+        NSLog(@"[dsh-ctl %@] status=%d %@", subcommand, status, output);
+        [self toast:output.length > 0 ? output : [NSString stringWithFormat:@"dsh-ctl %@ 完成", subcommand]];
+        // 状态可能变了，等内核起稳再刷新
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            [weakSelf refreshMenu];
+            weakSelf.keepAliveSwitch.on = [weakSelf keepAliveEnabled];
+            [weakSelf probeKernelOnce];
+        });
+    }];
+}
+
+/// 停止内核前确认（避免误触把正在跑的任务中断）
+- (void)confirmStopKernel {
+    UIAlertController *a = [UIAlertController
+        alertControllerWithTitle:@"停止内核"
+                         message:@"正在运行的任务会被中断。同时会关闭后台保活。"
+                  preferredStyle:UIAlertControllerStyleActionSheet];
+    [a addAction:[UIAlertAction actionWithTitle:@"停止" style:UIAlertActionStyleDestructive
+                                        handler:^(UIAlertAction *_) {
+        [self ctl:@"stop" message:@"正在停止内核…"];
+    }]];
+    [a addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+
+    // iPad 需要 popover 锚点
+    a.popoverPresentationController.barButtonItem = self.navigationItem.rightBarButtonItem;
+    [self presentViewController:a animated:YES completion:nil];
 }
 
 /// 重启 dsh 内核（launchctl kickstart）
