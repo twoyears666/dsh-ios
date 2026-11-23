@@ -105,16 +105,19 @@ def main() -> int:
         errors += fail("不是 ar 归档（缺少 !<arch> 魔数）")
         return 1
     errors += ok("ar 魔数正确")
-    for member in (b"debian-binary", b"control.tar.gz", b"data.tar.gz"):
-        if member in data:
-            errors += ok(f"含 {member.decode()}")
+    present = [n for n, _ in iter_ar(data)]
+    for want in ("debian-binary", "control.tar", "data.tar"):
+        hits = [n for n in present if n == want or n.startswith(want + ".")]
+        if hits:
+            errors += ok(f"含 {hits[0]}")
         else:
-            errors += fail(f"缺少 {member.decode()}")
+            errors += fail(f"缺少 {want}*")
 
     # ---- 2. control ----
     print("\n[2] control 字段")
-    ctrl_tar = read_member(data, b"control.tar.gz")
-    ctrl = tarfile.open(fileobj=io.BytesIO(ctrl_tar), mode="r:gz")
+    ctrl_name = next(n for n, _ in iter_ar(data) if n.startswith("control.tar"))
+    ctrl_tar = read_member(data, ctrl_name.encode())
+    ctrl = tarfile.open(fileobj=io.BytesIO(ctrl_tar), mode="r:*")
     try:
         ctrl_text = ctrl.extractfile("./DEBIAN/control").read().decode("utf-8")
     except KeyError:
@@ -154,8 +157,9 @@ def main() -> int:
 
     # ---- 3. data 内容 ----
     print("\n[3] data 内容")
-    data_tar = read_member(data, b"data.tar.gz")
-    dt = tarfile.open(fileobj=io.BytesIO(data_tar), mode="r:gz")
+    data_name = next(n for n, _ in iter_ar(data) if n.startswith("data.tar"))
+    data_tar = read_member(data, data_name.encode())
+    dt = tarfile.open(fileobj=io.BytesIO(data_tar), mode="r:*")
     members = {m.name.lstrip("./"): m for m in dt.getmembers()}
     names = list(members.keys())
     errors += ok(f"共 {len(names)} 个条目")

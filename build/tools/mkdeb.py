@@ -30,6 +30,9 @@ def _ar_member(name: str, data: bytes, mtime: int, mode: int = 0o100644) -> byte
     """构造一个 ar 成员。名字需 <=16 字节且以 / 结尾。"""
     if len(name) > 16:
         raise ValueError(f"ar 成员名过长: {name}")
+    # 注意：不能给名字加 "/" 后缀。GNU ar 用 "/" 标记长文件名，
+    # 但 BSD ar 与 iOS 的 dpkg/Sileo 解析器不认这个约定，
+    # 会把成员名读成 "debian-binary/" 从而报 "cannot read"。
     hdr = (
         name.ljust(16).encode("ascii")
         + str(mtime).ljust(12).encode("ascii")
@@ -100,9 +103,20 @@ def _tar_bytes(root: str, include: str | None = None, mtime: int = 0) -> bytes:
     return buf.getvalue()
 
 
-def build(root: str, out: str, compression: str = "gzip") -> None:
+def build(root: str, out: str, compression: str = "xz") -> None:
     if not os.path.isdir(os.path.join(root, "DEBIAN")):
         raise SystemExit(f"缺少 {root}/DEBIAN 目录")
+
+    # 防呆：deb 的根下只应有 DEBIAN/ 和文件系统树（通常是 var/）。
+    # 出现裸文件或意料外的顶层目录，多半是测试目录被污染了。
+    allowed = {"DEBIAN", "var", "usr", "etc", "Library", "Applications", "System", "private"}
+    unexpected = [e for e in os.listdir(root)
+                  if e not in allowed and not e.startswith(".")]
+    if unexpected:
+        raise SystemExit(
+            f"{root} 下有意料外的顶层条目: {unexpected}\n"
+            f"  deb 根只应有 DEBIAN/ 和文件系统树（var/usr/etc/...）。\n"
+            f"  请检查构建目录是否被污染。")
 
     control = os.path.join(root, "DEBIAN")
     for req in ("control",):
@@ -181,10 +195,11 @@ def build(root: str, out: str, compression: str = "gzip") -> None:
     data_data = data_buf.getvalue()
 
     suffix = {"gzip": "gz", "xz": "xz"}[compression]
+    now = int(time.time())
     members = [
-        _ar_member("debian-binary/", b"2.0\n", 0),
-        _ar_member(f"control.tar.{suffix}/", ctrl_data, 0),
-        _ar_member(f"data.tar.{suffix}/", data_data, 0),
+        _ar_member("debian-binary", b"2.0\n", now),
+        _ar_member(f"control.tar.{suffix}", ctrl_data, now),
+        _ar_member(f"data.tar.{suffix}", data_data, now),
     ]
     with open(out, "wb") as fh:
         fh.write(AR_MAGIC)
@@ -203,7 +218,7 @@ def main() -> int:
         print(__doc__)
         return 2
     root, out = sys.argv[1], sys.argv[2]
-    comp = "gzip"
+    comp = "xz"
     if "--compression" in sys.argv:
         comp = sys.argv[sys.argv.index("--compression") + 1]
     build(root, out, comp)
