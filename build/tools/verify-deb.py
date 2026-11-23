@@ -118,14 +118,23 @@ def main() -> int:
     ctrl_name = next(n for n, _ in iter_ar(data) if n.startswith("control.tar"))
     ctrl_tar = read_member(data, ctrl_name.encode())
     ctrl = tarfile.open(fileobj=io.BytesIO(ctrl_tar), mode="r:*")
-    try:
-        ctrl_text = ctrl.extractfile("./DEBIAN/control").read().decode("utf-8")
-    except KeyError:
+    # control.tar 内的路径不带 DEBIAN/ 前缀（规范就是 ./control）
+    ctrl_member = None
+    for cand in ("./control", "control", "./DEBIAN/control", "DEBIAN/control"):
         try:
-            ctrl_text = ctrl.extractfile("DEBIAN/control").read().decode("utf-8")
+            ctrl.extractfile(cand)
+            ctrl_member = cand
+            break
         except KeyError:
-            errors += fail("control.tar.gz 里没有 DEBIAN/control")
-            return 1
+            continue
+    if ctrl_member is None:
+        errors += fail("control.tar 里没有 control 文件")
+        return 1
+    if ctrl_member in ("./DEBIAN/control", "DEBIAN/control"):
+        errors += fail(f"control 路径不规范（{ctrl_member}），应为 ./control")
+    else:
+        errors += ok(f"control 路径规范（{ctrl_member}）")
+    ctrl_text = ctrl.extractfile(ctrl_member).read().decode("utf-8")
 
     fields = {}
     for line in ctrl_text.splitlines():
@@ -146,14 +155,19 @@ def main() -> int:
 
     # control 脚本可执行
     for script in ("postinst", "prerm"):
-        try:
-            m = ctrl.getmember(f"./DEBIAN/{script}")
-            if m.mode & 0o111:
-                errors += ok(f"DEBIAN/{script} 可执行")
-            else:
-                errors += fail(f"DEBIAN/{script} 不可执行 (mode={oct(m.mode)})")
-        except KeyError:
-            errors += fail(f"缺少 DEBIAN/{script}")
+        found = None
+        for cand in (f"./{script}", script, f"./DEBIAN/{script}"):
+            try:
+                found = ctrl.getmember(cand)
+                break
+            except KeyError:
+                continue
+        if found is None:
+            errors += fail(f"缺少 {script}")
+        elif found.mode & 0o111:
+            errors += ok(f"{script} 可执行")
+        else:
+            errors += fail(f"{script} 不可执行 (mode={oct(found.mode)})")
 
     # ---- 3. data 内容 ----
     print("\n[3] data 内容")
