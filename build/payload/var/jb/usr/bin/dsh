@@ -114,35 +114,28 @@ case "$1" in
     web)
         mkdir -p "$DSH_LOG_DIR" 2>/dev/null || true
         LOG="$DSH_LOG_DIR/web.log"
-        # 清空旧日志（每次启动重新生成 token）
         : >"$LOG" 2>/dev/null || true
 
-        # 后台跑 dsh，前台轮询：边输出日志边打心跳，
-        # 避免长时间无输出被误认为卡死。
-        run_dsh "$@" >>"$LOG" 2>&1 &
+        # dsh 自己会打印带 token 的 URL，直接 exec 即可。
+        #
+        # 之前那套「后台跑 + 前台轮询 nc 端口」是错的：
+        #   - nc 在 iOS 上可能不存在，每次调用都可能长时间阻塞
+        #   - while kill -0 + wait 的组合会一直阻塞到 dsh 退出
+        #   - 端口检测用 DSH_WEB_PORT，与实际 argv 里的 --port 可能不一致
+        #
+        # 不用 tee（PIPESTATUS 是 bash 专有，本脚本是 #!/bin/sh）。
+        # 改用：后台写日志 + 前台 tail -f 回显，退出码从 wait 拿。
+        "$NODE" $TIER_ARGS $TIER_SQLITE_ARGS $DSH_NODE_FLAGS \
+             --expose-internals "$BIN" "$@" >>"$LOG" 2>&1 &
         DSHPID=$!
-        WAITED=0
-        LASTSIZE=0
-        while kill -0 "$DSHPID" 2>/dev/null; do
-            sleep 2
-            WAITED=$((WAITED + 2))
-            SIZE=$(wc -c <"$LOG" 2>/dev/null || echo 0)
-            if [ "$SIZE" != "$LASTSIZE" ]; then
-                # 有新输出：打印出来
-                tail -c +$((LASTSIZE + 1)) "$LOG" 2>/dev/null
-                LASTSIZE=$SIZE
-            elif [ $((WAITED % 10)) -eq 0 ] && [ "$WAITED" -le 60 ]; then
-                printf 'dsh: 启动中… 已等待 %s 秒\n' "$WAITED" >&2
-            fi
-            # 端口起来就退出等待（服务已就绪）
-            if [ "$WAITED" -ge 4 ] && nc -z 127.0.0.1 "${DSH_WEB_PORT:-3080}" 2>/dev/null; then
-                tail -c +$((LASTSIZE + 1)) "$LOG" 2>/dev/null
-                printf 'dsh: 服务已就绪\n' >&2
-                break
-            fi
-        done
-        wait "$DSHPID" 2>/dev/null
+
+        # tail 回显（dsh 退出时 tail 会因 SIGPIPE 自动结束）
+        tail -n +1 -f "$LOG" 2>/dev/null &
+        TAILPID=$!
+
+        wait "$DSHPID"
         RC=$?
+        kill "$TAILPID" 2>/dev/null || true
         ;;
     *)
         run_dsh "$@"

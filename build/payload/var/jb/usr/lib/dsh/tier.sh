@@ -58,11 +58,30 @@ TIER_CACHE=${DSH_HOME:-/var/jb/var/mobile/.dsh}/.dsh-tier
 TIER_SQLITE_ARGS="--experimental-sqlite --disable-warning=ExperimentalWarning"
 
 # 每行一段：档位名|node 参数（参数为空表示不加）
+# 档位顺序：**从保守到激进**。
+#
+# 原来是从激进到保守（native 优先），但 iOS 上 native/single/balanced/safe
+# 几乎必定 SIGBUS（pthread_jit_write_protect_np 按线程生效，V8 后台线程
+# 编译 WASM 时写可执行页被内核拒绝）。每档白等 8 秒超时，用户以为卡死。
+#
+# 改成 nowasm 优先：
+#   - 第一档就能过 → 1-2 秒启动
+#   - 如果设备真支持 JIT（少数），用户可 DSH_TIER=native 手动指定
+#
+# DSH_TIER_ORDER=fast 可切回激进优先（调试用）
+if [ "${DSH_TIER_ORDER:-safe}" = "fast" ]; then
 TIERS='native|
 single|--single-threaded
 balanced|--single-threaded --no-concurrent-recompilation --no-concurrent-sparkplug --no-wasm-async-compilation --wasm-num-compilation-tasks=1 --no-wasm-tier-up
 safe|--single-threaded --no-concurrent-recompilation --no-concurrent-sparkplug --no-concurrent-sweeping --no-concurrent-marking --no-wasm-async-compilation --wasm-num-compilation-tasks=1 --no-wasm-tier-up --no-wasm-dynamic-tiering --max-opt=1
 nowasm|--jitless --require /var/jb/usr/lib/dsh/fetch-shim.cjs'
+else
+TIERS='nowasm|--jitless --require /var/jb/usr/lib/dsh/fetch-shim.cjs
+safe|--single-threaded --no-concurrent-recompilation --no-concurrent-sparkplug --no-concurrent-sweeping --no-concurrent-marking --no-wasm-async-compilation --wasm-num-compilation-tasks=1 --no-wasm-tier-up --no-wasm-dynamic-tiering --max-opt=1
+balanced|--single-threaded --no-concurrent-recompilation --no-concurrent-sparkplug --no-wasm-async-compilation --wasm-num-compilation-tasks=1 --no-wasm-tier-up
+single|--single-threaded
+native|'
+fi
 
 # 由档位名取参数串。here-doc 的 while 在当前 shell 执行，变量能带出来。
 tier_args_for() {
@@ -77,10 +96,32 @@ EOF
 }
 
 # 单档冒烟。故意不加引号：参数串需要拆成多个 argv。
+# 单档冒烟，带硬超时。
+#
+# smoke.js 自己会 15 秒超时退出，但那只覆盖 JS 层。
+# 如果 V8 卡在 WASM 编译的 SIGBUS 边界上，进程可能更久才死。
+# 5 个档位 × 15 秒 = 75 秒，设备上用户会以为卡死。
+#
+# 这里用后台 + 轮询 kill 实现 8 秒硬超时（POSIX 无 timeout 命令）。
+TIER_PROBE_TIMEOUT=${DSH_TIER_PROBE_TIMEOUT:-8}
+
 tier_probe() {
     _t_name=$1
+    _t_args=$2
     # shellcheck disable=SC2086
-    "$TIER_NODE" $2 "$TIER_SMOKE" >/dev/null 2>&1
+    "$TIER_NODE" $_t_args "$TIER_SMOKE" >/dev/null 2>&1 &
+    _t_pid=$!
+    _t_waited=0
+    while kill -0 "$_t_pid" 2>/dev/null; do
+        if [ "$_t_waited" -ge "$TIER_PROBE_TIMEOUT" ]; then
+            kill -9 "$_t_pid" 2>/dev/null || true
+            wait "$_t_pid" 2>/dev/null || true
+            return 124  # 超时
+        fi
+        sleep 1
+        _t_waited=$((_t_waited + 1))
+    done
+    wait "$_t_pid" 2>/dev/null
     return $?
 }
 
@@ -112,8 +153,11 @@ tier_select() {
 
     # 3) 逐档真探测。SIGBUS 时 $? 为 138（128+10），继续下一档。
     if [ ! -f "$TIER_SMOKE" ]; then return 1; fi
+    _t_idx=0
     while IFS='|' read -r _t_n _t_a; do
         [ -z "$_t_n" ] && continue
+        _t_idx=$((_t_idx + 1))
+        printf 'dsh: 探测启动档位 %s (%s)…\n' "$_t_idx" "$_t_n" >&2
         if tier_probe "$_t_n" "$_t_a"; then
             TIER_NAME=$_t_n
             TIER_ARGS=$_t_a
