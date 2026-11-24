@@ -149,6 +149,20 @@ jobs:
                  "$NM"/@deepseek-ai/libreoffice-kit-darwin-* \
                  "$NM"/@deepseek-ai/node-addon-system-*-* \
                  "$NM"/node-addon-require-builtin-*-* 2>/dev/null || true
+
+          # .bin/ 里可能有指向已剔除包的启动脚本（npm install 生成）。
+          # 例如 .bin/dsoffice → libreoffice-kit-darwin-arm64（已删），
+          # 留着会让 deb 校验报「macOS 残留」。
+          for b in dsoffice soffice libreoffice; do
+            rm -f "$NM/.bin/$b" 2>/dev/null || true
+          done
+          # 兜底：删掉所有指向不存在目标的 .bin 脚本
+          if [ -d "$NM/.bin" ]; then
+            for link in "$NM"/.bin/*; do
+              [ -e "$link" ] || rm -f "$link" 2>/dev/null || true
+            done
+          fi
+          echo ".bin 剩余: $(ls "$NM/.bin" 2>/dev/null | wc -l)"
           N=$(find "$NM" -name '*.node' | wc -l)
           echo "剩余 .node: $N"
           test "$N" = "0" || { echo "❌ 仍有原生模块"; exit 1; }

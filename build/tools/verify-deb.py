@@ -207,11 +207,16 @@ def main() -> int:
 
     # ---- 6. macOS 残留 ----
     print("\n[6] macOS 残留检查")
+    # 注意：.bin/dsoffice 这类启动脚本是 npm 生成的，指向已剔除的
+    # libreoffice-kit-darwin-arm64。它本身不是 macOS 二进制，
+    # 但留着没意义，仍视为残留（CI 已清理）。
     macos = [n for n in names
              if ".app/Contents/MacOS/" in n
              or n.endswith("/dsoffice")
              or n.endswith("/spawn-helper")
-             or "libreoffice-kit-darwin" in n]
+             or "libreoffice-kit-darwin" in n
+             or "sherpa-onnx-darwin" in n
+             or "@img/sharp-darwin" in n]
     if macos:
         errors += fail(f"发现 {len(macos)} 个 macOS 残留:")
         for n in macos[:5]:
