@@ -95,6 +95,23 @@ jobs:
             "@deepseek-ai/dsh@${DSH_VERSION}"
           echo "包数: $(ls node_modules | wc -l)"
 
+          # ---- 对齐 mac 版的 pi-ai 版本 ----
+          #
+          # mac 版 app.asar 里是 @earendil-works/pi-ai@1.3.0，
+          # 它的 dist/providers/data/ 有 43 个 json（含 .manifest.json）。
+          #
+          # npm 现在解析到 1.6.0，上游打包时漏了 data/ 目录，
+          # 导致运行时：
+          #   llm-pi-ai: Cannot find module '.../providers/data/.manifest.json'
+          #
+          # 固定回 1.3.0，保证与 mac 版一致。
+          npm install --ignore-scripts --no-audit --no-fund --loglevel=error \
+            --no-save "@earendil-works/pi-ai@1.3.0"
+          echo "pi-ai 版本: $(node -p "require('./node_modules/@earendil-works/pi-ai/package.json').version")"
+          test -f node_modules/@earendil-works/pi-ai/dist/providers/data/.manifest.json \
+            || { echo "❌ pi-ai 缺 .manifest.json"; exit 1; }
+          echo "✅ pi-ai data/ 完整"
+
       - name: 应用纯 JS shim
         run: |
           NM=build/work/npm/node_modules
