@@ -56,7 +56,77 @@ const DEFAULT_BASH_SHELL = (() => {
   check: 'cjs',
 });
 
-// ---------------------------------------------------------------- 3. 会话压缩
+// ---------------------------------------------------------------- 3. 会话压缩自适应
+//
+// 问题：dsh 默认压缩是 "zstd"。如果会话目录里已有明文 .jsonl 文件
+// （来自旧版本 / Node 22 时代 / 从桌面端拷来的数据），
+// checkRootEncoding() 会抛 encodingMismatch：
+//
+//   session artifact ".../session.v4.jsonl" uses .jsonl, but this backend
+//   is configured for compression "zstd"
+//
+// 后果很严重：workspace 服务挂掉 → session-controller / workspace-controller /
+// ui-deliverables 全部 pending → 整个 UI 不可用。
+//
+// 原版设计是「宁可报错也不混用」，但那要求用户手动清理数据目录。
+//
+// 这里改成**自适应**：扫描会话目录，看实际用的是哪种格式，然后切换过去。
+//   - 目录里有 .jsonl 明文 → 用 none
+//   - 目录里有 .jsonl.zstd  → 用 zstd
+//   - 目录为空               → 保持默认 zstd
+//
+// 这样新装、升级、从桌面端拷数据三种情况都能正常工作。
+PATCHES.push({
+  name: '会话压缩自适应（不再因 encodingMismatch 挂掉）',
+  file: '@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js',
+  old: `	async checkRootEncoding() {
+		await this.mapSessionDirectories(async (dir) => {
+			const incompatible = await this.findOppositeGenerationInDirectory(dir);
+			if (incompatible !== void 0) throw this.encodingMismatch(incompatible);
+		});
+	}`,
+  new: `	async checkRootEncoding() {
+		// dsh-iOS: 自适应压缩格式，而不是抛 encodingMismatch。
+		//
+		// 原逻辑：目录里出现「相反压缩格式」就抛错，导致 workspace 服务
+		// 整个挂掉（session-controller / workspace-controller / ui-deliverables
+		// 全部 pending，UI 不可用）。
+		//
+		// 新逻辑：看目录里实际用的是什么格式，然后切换 this.compression。
+		// 只切一次（rootEncodingCheck 是 memoized 的）。
+		let detected;
+		await this.mapSessionDirectories(async (dir) => {
+			if (detected !== void 0) return;
+			let entries;
+			try {
+				entries = await this.fs.readdir(dir);
+			} catch {
+				return;
+			}
+			for (const entry of entries) {
+				const name = typeof entry === "string" ? entry : entry?.name;
+				if (name === void 0) continue;
+				// 明文 .jsonl（无 .zstd 后缀）
+				if (parseGenerationLogFilename(name, "none") !== void 0) {
+					detected = "none";
+					return;
+				}
+				if (parseGenerationLogFilename(name, "zstd") !== void 0) {
+					detected = "zstd";
+					return;
+				}
+			}
+		});
+		if (detected !== void 0 && detected !== this.compression) {
+			this.compression = detected;
+			this.ctx?.logger?.info?.(
+				'session compression adapted to ' + detected + ' to match existing artifacts');
+		}
+	}`,
+  marker: 'dsh-iOS: 自适应压缩格式',
+  check: 'esm',
+});
+
 // Node 22.12 之前没有 node:zlib 的 zstd 系列。用 Node 24 时原生支持，
 // 无需降级；但若会话文件要与桌面端互通则保持 zstd。这里不动。
 //
