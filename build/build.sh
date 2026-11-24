@@ -91,6 +91,19 @@ NODE_COUNT=$(find "$NM" -name '*.node' | wc -l | tr -d ' ')
 [ "$NODE_COUNT" = "0" ] || die "依赖树里仍有 $NODE_COUNT 个 .node"
 log "  .node = 0 ✅"
 
+# ---------------------------------------------------------------- 2a. 依赖完整性检查
+log "检查依赖树完整性"
+if node "$HERE/scripts/check-deps.js" "$NM/node_modules"; then
+    log "  ✅ 依赖树完整"
+else
+    RC=$?
+    if [ "$RC" = "1" ]; then
+        die "依赖树有致命问题（见上）"
+    else
+        warn "依赖树有警告（可选依赖缺失，不影响启动）"
+    fi
+fi
+
 # ---------------------------------------------------------------- 2b. iOS 适配补丁
 log "应用 iOS 适配补丁"
 node "$HERE/scripts/patch-ios.js" "$NM/node_modules" || die "补丁失败"

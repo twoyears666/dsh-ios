@@ -149,6 +149,17 @@ jobs:
           echo "最大文件（>3MB）："
           find "$NM" -type f -size +3M -exec ls -lh {} \; 2>/dev/null | awk '{print "  "$5" "$9}' | head -10
 
+      - name: 检查依赖完整性
+        run: |
+          node build/scripts/check-deps.js build/work/npm/node_modules || {
+            RC=$?
+            if [ "$RC" = "1" ]; then
+              echo "❌ 依赖树有致命问题"
+              exit 1
+            fi
+            echo "⚠ 有可选依赖缺失（不影响启动）"
+          }
+
       - name: 打 iOS 补丁
         run: node build/scripts/patch-ios.js build/work/npm/node_modules
 

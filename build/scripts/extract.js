@@ -37,13 +37,33 @@ const HDR = JSON.parse(hb.toString('utf8').replace(/\0+$/, ''));
 const DATA_OFFSET = 16 + headerSize;
 const FILE_TOTAL = fs.fstatSync(fd).size;
 
+// app.asar.unpacked/ —— 部分文件不在 asar 里，而在这里
+// （Electron 把原生模块和它们同目录的纯 JS 包一起 unpack）
+const UNPACKED_DIR = path.join(path.dirname(ASAR), 'app.asar.unpacked');
+
 function readFile(relPath) {
   let node = HDR;
   for (const seg of relPath.split('/').filter(Boolean)) {
     if (!node.files || !node.files[seg]) return null;
     node = node.files[seg];
   }
-  if (!node || node.offset === undefined) return null;
+  if (!node) return null;
+
+  // unpacked: 文件在 app.asar.unpacked/ 里，不在 asar 数据区
+  if (node.unpacked === true) {
+    const diskPath = path.join(UNPACKED_DIR, relPath);
+    try {
+      return fs.readFileSync(diskPath);
+    } catch (e) {
+      stats.unpackedMiss = (stats.unpackedMiss || 0) + 1;
+      if (stats.unpackedMiss <= 5) {
+        console.warn(`[extract] unpacked 文件读取失败: ${diskPath}`);
+      }
+      return null;
+    }
+  }
+
+  if (node.offset === undefined) return null;
   const off = DATA_OFFSET + Number(node.offset);
   if (off + node.size > FILE_TOTAL) return null;
   const buf = Buffer.alloc(node.size);
@@ -161,6 +181,7 @@ function walk(node, rel) {
 
   const buf = readFile('dsh/' + rel);
   if (buf === null) { stats.skippedBin++; return; }
+  stats.unpackedFiles = (stats.unpackedFiles || 0) + (node.unpacked === true ? 1 : 0);
 
   const dest = path.join(OUT, rel);
   mkdirp(path.dirname(dest));
