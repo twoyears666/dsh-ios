@@ -145,10 +145,42 @@ jobs:
             -o -name docs -o -name .github -o -name prebuilds \) \
             -prune -exec rm -rf {} + 2>/dev/null || true
           find "$NM" -type f \( -iname 'readme*' -o -iname 'changelog*' -o -iname '*.md' \) -delete 2>/dev/null || true
+          # 剔除平台专属 + 体积巨大的包
           rm -rf "$NM"/@img "$NM"/@koromix "$NM"/sherpa-onnx-* "$NM"/node-pty \
                  "$NM"/@deepseek-ai/libreoffice-kit-darwin-* \
                  "$NM"/@deepseek-ai/node-addon-system-*-* \
                  "$NM"/node-addon-require-builtin-*-* 2>/dev/null || true
+
+          # libreoffice-kit-wasm：121MB wasm + 22MB data，iOS 上用不了也太大
+          rm -rf "$NM"/@deepseek-ai/libreoffice-kit-wasm 2>/dev/null || true
+
+          # 所有非 iOS 平台的 @vscode/ripgrep 二进制
+          # （npm --omit=optional 可能仍装上 linux-x64 等）
+          for plat in linux-x64 linux-arm64 linux-arm linux-ppc64 linux-riscv64 \
+                      linux-s390x linux-ia32 win32-x64 win32-arm64 win32-ia32 \
+                      darwin-x64 darwin-arm64; do
+            rm -rf "$NM/@vscode/ripgrep-$plat" 2>/dev/null || true
+          done
+          # 同理清理 sharp / koffi / sherpa 的其他平台
+          rm -rf "$NM"/@img/sharp-* "$NM"/@koromix/koffi-* 2>/dev/null || true
+
+          # inspector 的 devtools 调试资源：iOS 上用不到，但体积大
+          #   lighthouse_worker.js  8.8 MB
+          #   client.pdf.js         6.5 MB
+          #   client.excel.js       5.3 MB
+          # 只删 worker，保留 inspector 本体（浏览器调试面板要用）
+          rm -rf "$NM"/@deepseek-ai/dsh-experimental-inspector/lib/devtools/entrypoints/lighthouse_worker 2>/dev/null || true
+
+          # 瘦身：删 map / d.ts / md（extract.js 已做，CI 这里也做一遍）
+          find "$NM" -name '*.map' -delete 2>/dev/null || true
+          find "$NM" -name '*.d.ts' -delete 2>/dev/null || true
+          find "$NM" -name '*.d.cts' -delete 2>/dev/null || true
+          find "$NM" -name '*.d.mts' -delete 2>/dev/null || true
+
+          echo "=== 体积检查 ==="
+          du -sh "$NM" 2>/dev/null
+          echo "最大文件："
+          find "$NM" -type f -size +3M -exec ls -lh {} \; 2>/dev/null | awk '{print "  "$5" "$9}' | head -8
 
           # .bin/ 里可能有指向已剔除包的启动脚本（npm install 生成）。
           # 例如 .bin/dsoffice → libreoffice-kit-darwin-arm64（已删），
