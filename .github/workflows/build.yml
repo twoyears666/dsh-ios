@@ -108,8 +108,23 @@ jobs:
           npm install --ignore-scripts --no-audit --no-fund --loglevel=error \
             --no-save "@earendil-works/pi-ai@1.3.0"
           echo "pi-ai 版本: $(node -p "require('./node_modules/@earendil-works/pi-ai/package.json').version")"
-          test -f node_modules/@earendil-works/pi-ai/dist/providers/data/.manifest.json \
-            || { echo "❌ pi-ai 缺 .manifest.json"; exit 1; }
+          # 诊断：列出 data/ 的实际内容（含隐藏文件）
+          DATA=node_modules/@earendil-works/pi-ai/dist/providers/data
+          echo "=== pi-ai data/ 实际内容 ==="
+          ls -la "$DATA" 2>/dev/null | head -8
+          echo "文件数: $(ls -a "$DATA" 2>/dev/null | grep -v '^\.$\|^\.\.$' | wc -l)"
+
+          # 双保险：manifest 缺失就从 tarball 里补回来
+          if [ ! -f "$DATA/.manifest.json" ]; then
+            echo "⚠ .manifest.json 缺失，从官方 tarball 恢复"
+            TB="https://registry.npmjs.org/@earendil-works/pi-ai/-/pi-ai-1.3.0.tgz"
+            curl -sSL --retry 3 -m 300 -o /tmp/piai.tgz "$TB"
+            tar xzf /tmp/piai.tgz -C /tmp "package/dist/providers/data/.manifest.json" 2>/dev/null
+            cp /tmp/package/dist/providers/data/.manifest.json "$DATA/.manifest.json" \
+              || { echo "❌ 恢复失败"; exit 1; }
+            echo "✅ 已恢复 .manifest.json ($(wc -c < "$DATA/.manifest.json") 字节)"
+          fi
+          test -f "$DATA/.manifest.json" || { echo "❌ pi-ai 缺 .manifest.json"; exit 1; }
           echo "✅ pi-ai data/ 完整"
 
       - name: 应用纯 JS shim
@@ -245,6 +260,12 @@ jobs:
       - name: 校验最终载荷
         run: |
           JB=build/root/var/jb
+          echo "=== 诊断：pi-ai manifest 是否在 payload 里 ==="
+          ls -la "$JB/usr/lib/dsh/node_modules/@earendil-works/pi-ai/dist/providers/data/" 2>/dev/null | head -5 \
+            || echo "  ❌ data 目录不存在"
+          test -f "$JB/usr/lib/dsh/node_modules/@earendil-works/pi-ai/dist/providers/data/.manifest.json" \
+            || { echo "❌ payload 里缺 pi-ai/.manifest.json"; exit 1; }
+          echo "✅ payload 里 pi-ai data/ 完整"
           echo "=== 必需文件 ==="
           for f in usr/bin/dsh usr/bin/dsh-doctor usr/bin/dsh-url \
                    usr/lib/dsh/bin/node usr/lib/dsh/ios-image-shim.mjs \
