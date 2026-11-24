@@ -110,6 +110,7 @@ static BOOL DSHProbeKernel(NSString *host, NSInteger port) {
 @property (nonatomic, strong) NSMutableArray<NSDictionary *> *sessions;
 @property (nonatomic, assign) BOOL kernelReady;
 @property (nonatomic, assign) NSInteger kernelProbeTries;
+@property (nonatomic, assign) NSInteger authRetryCount;
 
 // 目录选择器回调
 @property (nonatomic, copy, nullable) void (^pendingPickCompletion)(NSString *_Nullable);
@@ -130,6 +131,7 @@ static BOOL DSHProbeKernel(NSString *host, NSInteger port) {
 - (nullable NSString *)scrapeTokenFromLog;
 - (void)refreshSessions;
 - (void)showLoadError:(NSError *)error;
+- (void)clearAuthCookies;
 
 @end
 
@@ -142,7 +144,22 @@ static BOOL DSHProbeKernel(NSString *host, NSInteger port) {
 
     self.sessions = [NSMutableArray array];
     if (!self.baseURL) {
-        self.baseURL = DSHEnvValue(@"DSH_WEB_URL") ?: kDSHDefaultBaseURL;
+        // DSH_WEB_URL 可能带 ?token=xxx，必须剥掉 query，
+        // 否则后面再拼 ?token= 会变成 .../?token=abc/?token=xyz（无效 URL）。
+        NSString *raw = DSHEnvValue(@"DSH_WEB_URL") ?: kDSHDefaultBaseURL;
+        NSURLComponents *c = [NSURLComponents componentsWithString:raw];
+        if (c) {
+            c.query = nil;
+            c.fragment = nil;
+            NSString *clean = c.string;
+            self.baseURL = clean.length > 0 ? clean : kDSHDefaultBaseURL;
+        } else {
+            self.baseURL = kDSHDefaultBaseURL;
+        }
+    }
+    // 去掉可能的尾部斜杠，保证后面拼 /?token= 时不会出现 //
+    while ([self.baseURL hasSuffix:@"/"]) {
+        self.baseURL = [self.baseURL substringToIndex:self.baseURL.length - 1];
     }
 
     self.view.backgroundColor = [UIColor systemBackgroundColor];
@@ -517,6 +534,7 @@ static BOOL DSHProbeKernel(NSString *host, NSInteger port) {
 #pragma mark - WKNavigationDelegate
 
 - (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
+    self.authRetryCount = 0;   // 成功则重置
     [self.spinner stopAnimating];
     self.loadingOverlay.hidden = YES;
     [self refreshSessions];
@@ -531,10 +549,42 @@ static BOOL DSHProbeKernel(NSString *host, NSInteger port) {
 }
 
 - (void)showLoadError:(NSError *)error {
+    // 401 说明 token 失效或 cookie 不对：重新从日志抓 token 重试。
+    // 这很常见 —— 内核重启后 token 会变，旧 URL 就失效了。
+    BOOL isAuthFailure = (error.code == 401)
+        || [error.localizedDescription containsString:@"401"]
+        || [error.localizedDescription containsString:@"authentication"];
+
+    if (isAuthFailure && self.authRetryCount < 2) {
+        self.authRetryCount += 1;
+        NSLog(@"[dsh] 认证失败，重新抓 token 重试（第 %ld 次）", (long)self.authRetryCount);
+        self.statusLabel.text = @"重新获取认证…";
+        [self.spinner startAnimating];
+        // 清掉 cookie，强制用新 token 重新握手
+        [self clearAuthCookies];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            [self loadWorkbench];
+        });
+        return;
+    }
+
     self.loadingOverlay.hidden = NO;
     [self.spinner stopAnimating];
     self.statusLabel.text = [NSString stringWithFormat:@"加载失败\n%@", error.localizedDescription];
     [self.reloadButton setHidden:NO];
+}
+
+/// 清掉 dsh 的认证 cookie，让下一次请求重新走 token 换 cookie
+- (void)clearAuthCookies {
+    WKHTTPCookieStore *store = self.webView.configuration.websiteDataStore.httpCookieStore;
+    [store getAllCookies:^(NSArray<NSHTTPCookie *> *cookies) {
+        for (NSHTTPCookie *c in cookies) {
+            if ([c.name hasPrefix:@"dsh-auth"]) {
+                [store deleteCookie:c completionHandler:nil];
+            }
+        }
+    }];
 }
 
 #pragma mark - 会话列表
