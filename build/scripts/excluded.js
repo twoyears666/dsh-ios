@@ -104,7 +104,8 @@ const DROP_PACKAGES = new Set([
   // ---- 桌面专属（Electron 宿主）----
   // iOS 无 Electron，由原生 UIKit App 替代
   '@deepseek-ai/dsh-desktop-host',
-  '@deepseek-ai/dsh-error',           // desktop-host 专用
+  // 注意：@deepseek-ai/dsh-error 不能删！它是核心包，
+  // 被 dsh-subprocess / dsh-llm / dsh-plugin-manager 等大量引用。
   '@deepseek-ai/dsh-deepseek-chat-import',  // Electron 导入功能
 
   // ---- Computer Use（macOS 专属实现）----
