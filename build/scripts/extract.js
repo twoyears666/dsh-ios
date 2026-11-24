@@ -51,39 +51,19 @@ function readFile(relPath) {
   return buf;
 }
 
-// ---- 2. 平台包剔除规则 ----
-// 这些包只含 macOS/Windows/Linux 预编译产物，iOS 上永不使用
-const DROP_PACKAGES = new Set([
-  '@img/sharp-darwin-arm64',
-  '@img/sharp-darwin-x64',
-  '@img/sharp-libvips-darwin-arm64',
-  '@img/sharp-libvips-darwin-x64',
-  '@koromix/koffi-darwin-arm64',
-  '@koromix/koffi-darwin-x64',
-  '@vscode/ripgrep-darwin-arm64',
-  '@vscode/ripgrep-darwin-x64',
-  'sherpa-onnx-darwin-arm64',
-  'sherpa-onnx-node',
-  '@deepseek-ai/libreoffice-kit-darwin-arm64',
-  '@deepseek-ai/node-addon-system-darwin-arm64',
-  '@deepseek-ai/node-addon-system-darwin-x64',
-  'node-addon-require-builtin-darwin-arm64',
-  'node-addon-require-builtin-darwin-x64',
-  // 桌面专属
-  '@deepseek-ai/dsh-desktop-host',
-  '@deepseek-ai/dsh-experimental-cua-macos',
-  '@deepseek-ai/dsh-cua-bundle',
-]);
-if (!KEEP_LO) {
-  DROP_PACKAGES.add('@deepseek-ai/libreoffice-kit-darwin-arm64');
-}
+// ---- 2. 剔除规则（引用权威清单 scripts/excluded.js）----
+const {
+  DROP_PACKAGES,
+  DROP_PATHS,
+  DROP_GLOBS,
+  HEAVY_FILES,
+  FILTER_BINARY_IN,
+} = require('./excluded');
 
-// 需要保留但内容要过滤的包（剔除其中的二进制，保留 JS）
-const FILTER_BINARY_IN = new Set([
-  '@deepseek-ai/libreoffice-kit',
-  '@deepseek-ai/dsh-cua',
-  '@deepseek-ai/dsh-computer-use',
-]);
+// 通配前缀（DROP_GLOBS 里以 * 结尾的转成前缀匹配）
+const DROP_PREFIXES = DROP_GLOBS
+  .filter((g) => g.endsWith('*'))
+  .map((g) => g.slice(0, -1));
 
 // ---- 3. 扩展名规则 ----
 const DROP_EXT_DEV = new Set(['.ts', '.tsx', '.cts', '.mts', '.map']);
@@ -130,9 +110,27 @@ function walk(node, rel) {
   if (node.link) return; // 符号链接暂不处理
 
   const pkg = pkgOf(rel);
-  if (pkg && DROP_PACKAGES.has(pkg)) {
-    stats.skippedPkg++; stats.skippedPkgBytes += node.size || 0;
-    return;
+  if (pkg) {
+    // 精确匹配
+    if (DROP_PACKAGES.has(pkg)) {
+      stats.skippedPkg++; stats.skippedPkgBytes += node.size || 0;
+      return;
+    }
+    // 通配前缀匹配（如 @img/sharp-*）
+    for (const prefix of DROP_PREFIXES) {
+      if (pkg.startsWith(prefix)) {
+        stats.skippedPkg++; stats.skippedPkgBytes += node.size || 0;
+        return;
+      }
+    }
+  }
+
+  // 路径剔除（包内特定目录）
+  for (const p of DROP_PATHS) {
+    if (rel === p || rel.startsWith(p + '/')) {
+      stats.skippedBin++; stats.skippedBinBytes += node.size || 0;
+      return;
+    }
   }
 
   const base = path.basename(rel);
@@ -155,8 +153,8 @@ function walk(node, rel) {
     return;
   }
 
-  // 大文件保护：dsoffice 等
-  if (base === 'dsoffice' || base === 'rg' || base === 'rg.exe') {
+  // 大文件保护（引用权威清单）
+  if (HEAVY_FILES.has(base)) {
     stats.skippedBin++; stats.skippedBinBytes += node.size || 0;
     return;
   }
