@@ -65,13 +65,21 @@ static NSString *DSHEnvValue(NSString *key) {
     return nil;
 }
 
-/// 探测 dsh 内核是否在监听
+/// 探测 dsh 内核是否**真正就绪**（不只是端口开着）。
+///
+/// 之前只做 TCP connect，端口一开就认为好了，但那时 HTTP 服务
+/// 可能还没挂载完，加载页面会失败。
+///
+/// 现在发一个真正的 HTTP 请求：不带 token 访问 /，期望拿到
+///   401  → 服务就绪（认证中间件在跑，这是正常的）
+///   200  → 服务就绪
+///   其它 → 未就绪
 static BOOL DSHProbeKernel(NSString *host, NSInteger port) {
-    // 用 POSIX socket 做一次 connect，避免异步等待
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return NO;
-    struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
-    setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &(int){1}, sizeof(int));
+    int yes = 1;
+    setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &yes, sizeof(yes));
+    struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
@@ -80,11 +88,30 @@ static BOOL DSHProbeKernel(NSString *host, NSInteger port) {
     addr.sin_port = htons((uint16_t)port);
     inet_pton(AF_INET, host.UTF8String, &addr.sin_addr);
 
-    BOOL ok = (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0);
-    close(fd);
-    return ok;
-}
+    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+        close(fd);
+        return NO;
+    }
 
+    // 发一个最小 HTTP/1.1 请求
+    const char *req = "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+    ssize_t sent = write(fd, req, strlen(req));
+    if (sent <= 0) { close(fd); return NO; }
+
+    // 读状态行：期望 "HTTP/1.x 200" 或 "HTTP/1.x 401" 或 "HTTP/1.x 303"
+    char buf[256] = {0};
+    ssize_t got = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (got <= 0) return NO;
+
+    NSString *head = [[NSString alloc] initWithBytes:buf length:(NSUInteger)got
+                                             encoding:NSUTF8StringEncoding];
+    if (!head) return NO;
+    // 只要有 HTTP/1. 状态行且不是 5xx，就认为服务在跑
+    if (![head hasPrefix:@"HTTP/1."]) return NO;
+    if ([head containsString:@" 5"]) return NO;   // 5xx 说明后端有问题
+    return YES;
+}
 #pragma mark - DSHRootVC
 
 @interface DSHRootVC () <WKNavigationDelegate, WKUIDelegate, UITableViewDelegate, UITableViewDataSource,
@@ -384,32 +411,34 @@ static BOOL DSHProbeKernel(NSString *host, NSInteger port) {
 
     __weak typeof(self) weakSelf = self;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        if (DSHProbeKernel(host, port)) {
-            return;  // 已经在跑
-        }
+        if (DSHProbeKernel(host, port)) return;   // 已在跑
 
-        // 1) 优先 launchctl bootstrap（launchd 守护，最干净）
-        // 2) 退到 kickstart（已注册但没跑）
-        // 3) 最后直接后台起 dsh（launchd 不可用时）
-        NSString *cmd =
-            @"launchctl bootstrap system /var/jb/Library/LaunchDaemons/com.twoyears.dsh.plist 2>/dev/null"
-             " || launchctl kickstart system/com.twoyears.dsh 2>/dev/null"
-             " || launchctl load -w /var/jb/Library/LaunchDaemons/com.twoyears.dsh.plist 2>/dev/null"
-             " || (nohup /var/jb/usr/bin/dsh web --no-open --port 3080 >/dev/null 2>&1 &)";
+        // 直接脱离启动，不依赖 launchctl。
+        //
+        // 为什么不用 launchctl：
+        //   - App 沙箱里 launchctl 常被拒（即使有 no-sandbox entitlement）
+        //   - bootstrap/kickstart 都需要和 launchd 通信，权限模型复杂
+        //
+        // 用 posix_spawn + SETSID：新会话，脱离 App 进程组，
+        // App 挂起/退后台不会带走内核。
+        // 用独立文件，避免和 dsh 自己写的 web.log 冲突
+        // （dsh 会先清空 web.log，App 的 fd 偏移会错位）
+        NSString *logPath = @"/var/mobile/Media/deepseek-harness/logs/app-spawn.log";
+        pid_t pid = 0;
+        int rc = [DSHShell spawnDetached:@"/var/jb/usr/bin/dsh"
+                                    args:@[@"web", @"--no-open",
+                                           @"--port", [NSString stringWithFormat:@"%ld", (long)port]]
+                                 logPath:logPath
+                                     pid:&pid];
 
-        [DSHShell runAsync:@"/bin/sh"
-                      args:@[@"-c", cmd]
-                   timeout:20
-                completion:^(NSString *output, int status) {
+        NSLog(@"[dsh] spawnDetached rc=%d pid=%d", rc, pid);
+
+        // 无论成败都交给探测循环接手（可能 launchd 那边已经在跑）
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
             __strong typeof(weakSelf) self = weakSelf;
-            if (!self) return;
-            NSLog(@"[dsh] ensureKernelRunning status=%d output=%@", status, output);
-            // launchd 启动有延迟，稍等再让探测循环接手
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
-                           dispatch_get_main_queue(), ^{
-                [self probeKernelOnce];
-            });
-        }];
+            if (self) [self probeKernelOnce];
+        });
     });
 }
 
@@ -504,7 +533,17 @@ static BOOL DSHProbeKernel(NSString *host, NSInteger port) {
 
 /// 从 dsh 的日志里抓 token（内核启动时会打印带 token 的 URL）
 - (NSString *)scrapeTokenFromLog {
+    // 数据目录已迁到 Media（/var/mobile/Media/deepseek-harness），
+    // 旧路径保留作为兼容回退。
     NSArray<NSString *> *candidates = @[
+        // dsh 入口写这里（含 token）
+        @"/var/mobile/Media/deepseek-harness/logs/web.log",
+        // App 直接 spawn 时的输出
+        @"/var/mobile/Media/deepseek-harness/logs/app-spawn.log",
+        // launchd 守护
+        @"/var/mobile/Media/deepseek-harness/logs/dsh-daemon.log",
+        @"/var/mobile/Media/deepseek-harness/logs/dsh-daemon.err.log",
+        // 旧路径兼容
         @"/var/jb/var/mobile/.dsh/dsh-daemon.log",
         @"/var/jb/var/mobile/.dsh/dsh-daemon.err.log",
     ];
@@ -513,7 +552,8 @@ static BOOL DSHProbeKernel(NSString *host, NSInteger port) {
                                                      encoding:NSUTF8StringEncoding
                                                         error:NULL];
         if (content.length == 0) continue;
-        NSRange r = [content rangeOfString:@"token="];
+        // 日志可能记录多次启动，取最后一个 token（最新）
+        NSRange r = [content rangeOfString:@"token=" options:NSBackwardsSearch];
         if (r.location == NSNotFound) continue;
         NSUInteger start = r.location + r.length;
         NSUInteger i = start;

@@ -117,4 +117,70 @@ extern char **environ;
     });
 }
 
+#pragma mark - 脱离启动
+
++ (int)spawnDetached:(NSString *)path
+                args:(NSArray<NSString *> *)args
+             logPath:(NSString *)logPath
+                 pid:(pid_t *)pidOut {
+  if (path.length == 0) return EINVAL;
+
+  // argv
+  NSMutableArray<NSString *> *argv = [NSMutableArray arrayWithObject:path];
+  if (args) [argv addObjectsFromArray:args];
+  NSUInteger n = argv.count;
+  char **cargv = calloc(n + 1, sizeof(char *));
+  if (!cargv) return ENOMEM;
+  for (NSUInteger i = 0; i < n; i++) cargv[i] = strdup(argv[i].UTF8String);
+  cargv[n] = NULL;
+
+  posix_spawn_file_actions_t actions;
+  posix_spawn_file_actions_init(&actions);
+
+  // 输出重定向到日志（不占管道，否则父进程退出后子进程会 SIGPIPE）
+  int logFd = -1;
+  if (logPath.length > 0) {
+    // O_CREAT | O_WRONLY | O_APPEND
+    logFd = open(logPath.UTF8String, O_CREAT | O_WRONLY | O_APPEND, 0644);
+    if (logFd >= 0) {
+      posix_spawn_file_actions_adddup2(&actions, logFd, STDOUT_FILENO);
+      posix_spawn_file_actions_adddup2(&actions, logFd, STDERR_FILENO);
+      posix_spawn_file_actions_addclose(&actions, logFd);
+    }
+  } else {
+    int devnull = open("/dev/null", O_WRONLY);
+    if (devnull >= 0) {
+      posix_spawn_file_actions_adddup2(&actions, devnull, STDOUT_FILENO);
+      posix_spawn_file_actions_adddup2(&actions, devnull, STDERR_FILENO);
+      posix_spawn_file_actions_addclose(&actions, devnull);
+    }
+  }
+  // stdin 从 /dev/null 读，避免子进程阻塞在读 stdin
+  int devnullIn = open("/dev/null", O_RDONLY);
+  if (devnullIn >= 0) {
+    posix_spawn_file_actions_adddup2(&actions, devnullIn, STDIN_FILENO);
+    posix_spawn_file_actions_addclose(&actions, devnullIn);
+  }
+
+  // 关键：SETSID —— 新会话，脱离 App 的进程组。
+  // 不加这个，App 退到后台/被挂起时子进程会被一起暂停。
+  posix_spawnattr_t attr;
+  posix_spawnattr_init(&attr);
+  short flags = POSIX_SPAWN_SETSID;
+  posix_spawnattr_setflags(&attr, flags);
+
+  pid_t child = 0;
+  int rc = posix_spawn(&child, path.UTF8String, &actions, &attr, cargv, environ);
+
+  posix_spawnattr_destroy(&attr);
+  posix_spawn_file_actions_destroy(&actions);
+  for (NSUInteger i = 0; i < n; i++) free(cargv[i]);
+  free(cargv);
+  if (logFd >= 0) close(logFd);
+  if (devnullIn >= 0) close(devnullIn);
+
+  if (rc == 0 && pidOut) *pidOut = child;
+  return rc;
+}
+
 @end
