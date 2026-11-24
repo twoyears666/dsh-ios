@@ -61,6 +61,7 @@ jobs:
         with:
           name: dsh-app
           path: build/app/DSH.app
+          include-hidden-files: true
           if-no-files-found: error
 
   # ==========================================================================
@@ -198,6 +199,9 @@ jobs:
         with:
           name: dsh-cli-root
           path: build/root
+          # 必须：否则 .manifest.json 等隐藏文件会被跳过
+          # （pi-ai 的 data/.manifest.json 就因此丢失，导致第三方 API 不可用）
+          include-hidden-files: true
 
   # ==========================================================================
   # 3. 合并 CLI + GUI，产出最终 deb
