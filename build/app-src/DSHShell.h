@@ -25,6 +25,15 @@ NS_ASSUME_NONNULL_BEGIN
              logPath:(nullable NSString *)logPath
                  pid:(nullable pid_t *)pidOut;
 
+/// 同上，但可指定额外环境变量（覆盖/追加到当前 environ）。
+/// iOS App 的 PATH 里没有 /var/jb/usr/bin，直接 spawn 会导致
+/// 脚本里的 mkdir/tail/nc 等命令找不到。
++ (int)spawnDetached:(NSString *)path
+                args:(nullable NSArray<NSString *> *)args
+             logPath:(nullable NSString *)logPath
+                 env:(nullable NSDictionary<NSString *, NSString *> *)extraEnv
+                 pid:(nullable pid_t *)pidOut;
+
 /// 同步执行命令，返回合并的 stdout+stderr。
 /// @param path 可执行文件绝对路径（如 /var/jb/usr/bin/dsh-doctor）
 /// @param args 参数数组（不含 argv[0]）

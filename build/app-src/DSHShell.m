@@ -123,6 +123,14 @@ extern char **environ;
                 args:(NSArray<NSString *> *)args
              logPath:(NSString *)logPath
                  pid:(pid_t *)pidOut {
+  return [self spawnDetached:path args:args logPath:logPath env:nil pid:pidOut];
+}
+
++ (int)spawnDetached:(NSString *)path
+                args:(NSArray<NSString *> *)args
+             logPath:(NSString *)logPath
+                 env:(NSDictionary<NSString *, NSString *> *)extraEnv
+                 pid:(pid_t *)pidOut {
   if (path.length == 0) return EINVAL;
 
   // argv
@@ -169,13 +177,39 @@ extern char **environ;
   short flags = POSIX_SPAWN_SETSID;
   posix_spawnattr_setflags(&attr, flags);
 
+  // ---- 构造 envp：当前 environ + 覆盖项 ----
+  // 关键：iOS App 的 PATH 不含 /var/jb/usr/bin，
+  // 直接继承 environ 会让 dsh 脚本里的 mkdir/tail/nc 全部 ENOENT。
+  NSMutableDictionary<NSString *, NSString *> *merged = [NSMutableDictionary dictionary];
+  if (environ) {
+    for (char **e = environ; *e; e++) {
+      NSString *kv = [NSString stringWithUTF8String:*e];
+      NSRange eq = [kv rangeOfString:@"="];
+      if (eq.location != NSNotFound) {
+        merged[[kv substringToIndex:eq.location]] = [kv substringFromIndex:eq.location + 1];
+      }
+    }
+  }
+  if (extraEnv) [merged addEntriesFromDictionary:extraEnv];
+
+  NSUInteger envCount = merged.count;
+  char **envp = calloc(envCount + 1, sizeof(char *));
+  NSUInteger ei = 0;
+  for (NSString *k in merged) {
+    NSString *kv = [NSString stringWithFormat:@"%@=%@", k, merged[k]];
+    envp[ei++] = strdup(kv.UTF8String);
+  }
+  envp[envCount] = NULL;
+
   pid_t child = 0;
-  int rc = posix_spawn(&child, path.UTF8String, &actions, &attr, cargv, environ);
+  int rc = posix_spawn(&child, path.UTF8String, &actions, &attr, cargv, envp);
 
   posix_spawnattr_destroy(&attr);
   posix_spawn_file_actions_destroy(&actions);
   for (NSUInteger i = 0; i < n; i++) free(cargv[i]);
   free(cargv);
+  for (NSUInteger i = 0; i < envCount; i++) free(envp[i]);
+  free(envp);
   if (logFd >= 0) close(logFd);
   if (devnullIn >= 0) close(devnullIn);
 

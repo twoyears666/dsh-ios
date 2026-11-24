@@ -137,6 +137,8 @@ static BOOL DSHProbeKernel(NSString *host, NSInteger port) {
 @property (nonatomic, strong) NSMutableArray<NSDictionary *> *sessions;
 @property (nonatomic, assign) BOOL kernelReady;
 @property (nonatomic, assign) NSInteger kernelProbeTries;
+@property (nonatomic, assign) NSInteger kernelStartAttempts;
+@property (nonatomic, strong) NSTimer *loadProgressTimer;
 @property (nonatomic, assign) NSInteger authRetryCount;
 
 // 目录选择器回调
@@ -158,6 +160,7 @@ static BOOL DSHProbeKernel(NSString *host, NSInteger port) {
 - (nullable NSString *)scrapeTokenFromLog;
 - (void)refreshSessions;
 - (void)showLoadError:(NSError *)error;
+- (void)startLoadProgressTimer;
 - (void)clearAuthCookies;
 
 @end
@@ -425,10 +428,24 @@ static BOOL DSHProbeKernel(NSString *host, NSInteger port) {
         // （dsh 会先清空 web.log，App 的 fd 偏移会错位）
         NSString *logPath = @"/var/mobile/Media/deepseek-harness/logs/app-spawn.log";
         pid_t pid = 0;
+        // 关键：必须显式传环境变量。
+        // iOS App 的 PATH 只有 /usr/bin:/bin:/usr/sbin:/sbin，
+        // 不含 /var/jb/usr/bin。dsh 脚本里的 mkdir/tail/nc 会全部 ENOENT，
+        // 导致日志写不出来、内核起不来。
+        NSDictionary *env = @{
+            @"PATH": @"/var/jb/usr/bin:/var/jb/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+            @"HOME": @"/var/mobile",
+            @"DSH_ROOT": @"/var/mobile/Media/deepseek-harness",
+            @"DSH_HOME": @"/var/mobile/Media/deepseek-harness/data",
+            @"DSH_LOG_DIR": @"/var/mobile/Media/deepseek-harness/logs",
+            @"TMPDIR": @"/var/mobile/Media/deepseek-harness/cache/tmp",
+            @"LANG": @"en_US.UTF-8",
+        };
         int rc = [DSHShell spawnDetached:@"/var/jb/usr/bin/dsh"
                                     args:@[@"web", @"--no-open",
                                            @"--port", [NSString stringWithFormat:@"%ld", (long)port]]
                                  logPath:logPath
+                                     env:env
                                      pid:&pid];
 
         NSLog(@"[dsh] spawnDetached rc=%d pid=%d", rc, pid);
@@ -470,8 +487,26 @@ static BOOL DSHProbeKernel(NSString *host, NSInteger port) {
 
     self.kernelProbeTries += 1;
     if (self.kernelProbeTries > 26) {
+        // 第一轮 39 秒失败后，再尝试启动一次内核（spawn 可能失败过）
+        if (self.kernelStartAttempts < 2) {
+            self.kernelStartAttempts += 1;
+            self.kernelProbeTries = 0;
+            self.statusLabel.text = [NSString stringWithFormat:
+                @"内核未响应，重新启动（第 %ld 次）…", (long)self.kernelStartAttempts];
+            NSLog(@"[dsh] 探测超时，重新 spawn（第 %ld 次）", (long)self.kernelStartAttempts);
+            [self ensureKernelRunning];
+            return;
+        }
+
         [self.spinner stopAnimating];
-        self.statusLabel.text = @"dsh 内核未启动。\n请在终端运行：\n  dsh\n\n或检查 launchd：\n  launchctl list | grep twoyears";
+        self.statusLabel.text =
+            @"dsh 内核未启动。\n\n"
+             "排查步骤：\n"
+             "1. 终端运行 dsh-doctor 看自检\n"
+             "2. 看日志：\n"
+             "   /var/mobile/Media/deepseek-harness/logs/web.log\n"
+             "   /var/mobile/Media/deepseek-harness/logs/app-spawn.log\n"
+             "3. 手动启动：dsh web --no-open --port 3080";
         self.reloadButton.hidden = NO;
         return;
     }
@@ -529,6 +564,9 @@ static BOOL DSHProbeKernel(NSString *host, NSInteger port) {
                                          cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
                                      timeoutInterval:20];
     [self.webView loadRequest:req];
+
+    // 加载进度提示：每 5 秒更新一次，避免看起来卡死
+    [self startLoadProgressTimer];
 }
 
 /// 从 dsh 的日志里抓 token（内核启动时会打印带 token 的 URL）
@@ -575,6 +613,7 @@ static BOOL DSHProbeKernel(NSString *host, NSInteger port) {
 
 - (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
     self.authRetryCount = 0;   // 成功则重置
+    [self.loadProgressTimer invalidate];
     [self.spinner stopAnimating];
     self.loadingOverlay.hidden = YES;
     [self refreshSessions];
@@ -613,6 +652,23 @@ static BOOL DSHProbeKernel(NSString *host, NSInteger port) {
     [self.spinner stopAnimating];
     self.statusLabel.text = [NSString stringWithFormat:@"加载失败\n%@", error.localizedDescription];
     [self.reloadButton setHidden:NO];
+}
+
+/// 加载进度提示（web UI 在 iOS 上首屏可能要 10-30 秒）
+- (void)startLoadProgressTimer {
+    [self.loadProgressTimer invalidate];
+    __block NSInteger secs = 0;
+    __weak typeof(self) weakSelf = self;
+    self.loadProgressTimer = [NSTimer scheduledTimerWithTimeInterval:5.0
+                                                            repeats:YES
+                                                              block:^(NSTimer *t) {
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self) { [t invalidate]; return; }
+        secs += 5;
+        if (self.loadingOverlay.hidden) { [t invalidate]; return; }
+        self.statusLabel.text = [NSString stringWithFormat:
+            @"正在加载工作台… %ld 秒\n\n首次加载较慢（iOS 上 10-30 秒）", (long)secs];
+    }];
 }
 
 /// 清掉 dsh 的认证 cookie，让下一次请求重新走 token 换 cookie
