@@ -170,8 +170,11 @@ static void DSHAppLog(NSString *fmt, ...) {
 
     NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
     NSFileManager *fm = [NSFileManager defaultManager];
-    if (![fm fileExistsAtPath:path]) {
-        [data writeToFile:path atomically:NO];   // 首次创建，覆盖旧的
+    NSDictionary *attrs = [fm attributesOfItemAtPath:path error:NULL];
+    // 超过 512 KB 就重写，只留新的一行 —— App 可能开着几天，
+    // 日志无上限迟早把 /var/mobile 写满。
+    if (!attrs || [attrs fileSize] > 512 * 1024) {
+        [data writeToFile:path atomically:NO];
         return;
     }
     NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];

@@ -366,6 +366,26 @@ jobs:
           files: build/dist/*.deb
           generate_release_notes: true
 
+      # 滚动发布前先删掉上一轮留下的 deb。
+      # 不删的话 latest 里会同时挂着新旧两个 deb，
+      # 用户（和 Sileo 的「获取」按钮）很容易点到旧的那个。
+      - name: 清理 latest 里的旧 deb
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ASSETS=$(gh release view latest --repo "${{ github.repository }}" \
+                     --json assets -q '.assets[].name' 2>/dev/null || true)
+          for a in $ASSETS; do
+            case "$a" in
+              *.deb)
+                echo "删除旧资产: $a"
+                gh release delete-asset latest "$a" \
+                    --repo "${{ github.repository }}" --yes 2>/dev/null || true
+                ;;
+            esac
+          done
+
       - name: 发布 Release（main 滚动 latest）
         if: github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
