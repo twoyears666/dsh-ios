@@ -17,6 +17,7 @@
 #import "DSHShell.h"
 #import "DSHBrowserBridge.h"
 #import "DSHBrowserControl.h"
+#import "DSHVoice.h"
 
 // POSIX socket：用于内核存活探测（DSHProbeKernel）
 #import <sys/socket.h>
@@ -228,6 +229,9 @@ static void DSHAppLog(NSString *fmt, ...) {
 - (void)ctl:(NSString *)subcommand message:(NSString *)message;
 - (void)confirmStopKernel;
 - (void)confirmClearProcess;
+- (void)startVoiceInput;
+- (void)injectVoiceText:(NSString *)text;
+- (DSHVoice *)voice;
 - (void)refreshMenu;
 - (BOOL)keepAliveEnabled;
 - (void)ensureKernelRunning;
@@ -1252,6 +1256,10 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
             [self confirmClearProcess];
             break;
 
+        case DSHMenuActionVoice:
+            [self startVoiceInput];
+            break;
+
         case DSHMenuActionAbout: {
             NSString *ver = [[NSBundle mainBundle]
                              objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?";
@@ -1354,6 +1362,85 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
                       preferredStyle:UIAlertControllerStyleAlert];
         [a addAction:[UIAlertAction actionWithTitle:@"关闭" style:UIAlertActionStyleCancel handler:nil]];
         [self presentViewController:a animated:YES completion:nil];
+    }];
+}
+
+#pragma mark - 语音输入
+
+/// 单例 + 回调只绑一次。
+/// 回调里用 weakSelf，否则 DSHVoice 单例持有 block 会一直 retain 这个 VC。
+- (DSHVoice *)voice {
+    static DSHVoice *voice = nil;
+    static dispatch_once_t once;
+    __weak typeof(self) weakSelf = self;
+    dispatch_once(&once, ^{
+        voice = [DSHVoice shared];
+
+        voice.onState = ^(NSString *message) {
+            __strong typeof(weakSelf) self = weakSelf;
+            if (self) [self toast:message];
+        };
+        voice.onFinal = ^(NSString *text) {
+            __strong typeof(weakSelf) self = weakSelf;
+            if (self) [self injectVoiceText:text];
+        };
+        voice.onError = ^(NSString *message) {
+            __strong typeof(weakSelf) self = weakSelf;
+            if (!self) return;
+            UIAlertController *a = [UIAlertController
+                alertControllerWithTitle:@"语音输入"
+                                 message:message
+                          preferredStyle:UIAlertControllerStyleAlert];
+            [a addAction:[UIAlertAction actionWithTitle:@"好"
+                                                 style:UIAlertActionStyleCancel
+                                               handler:nil]];
+            [self presentViewController:a animated:YES completion:nil];
+        };
+    });
+    return voice;
+}
+
+- (void)startVoiceInput {
+    // 不可用时也照常走一遍：由 DSHVoice 给出具体原因
+    //（没权限 / 没麦克风 / 语言不支持 / 没网），比我们自己猜准。
+    [self.voice toggle];
+}
+
+/// 把识别出来的文字塞进当前聚焦的输入框。
+///
+/// 用菜单点语音时 WKWebView 会失焦，activeElement 可能已经是 body，
+/// 这时退回剪贴板 —— 至少用户不用重说一遍。
+- (void)injectVoiceText:(NSString *)text {
+    if (text.length == 0) return;
+
+    // 必须走 JSON 序列化：识别结果里可能有引号、反斜杠、换行，
+    // 直接拼进 JS 字符串会语法错误（甚至注入）。
+    NSData *json = [NSJSONSerialization dataWithJSONObject:@[text] options:0 error:NULL];
+    NSString *jsonArray = json ? [[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding]
+                               : @"[\"\"]";
+
+    NSString *js = [NSString stringWithFormat:
+        @"(function(a){"
+         "var t=a[0];var el=document.activeElement;"
+         "function fire(e){try{e.dispatchEvent(new Event('input',{bubbles:true}));}catch(_){}"
+         "try{e.dispatchEvent(new Event('change',{bubbles:true}));}catch(_){}}"
+         "if(el&&(el.tagName==='TEXTAREA'||el.tagName==='INPUT')){"
+         "var s=(el.selectionStart==null)?el.value.length:el.selectionStart;"
+         "var e2=(el.selectionEnd==null)?s:el.selectionEnd;"
+         "el.value=el.value.slice(0,s)+t+el.value.slice(e2);"
+         "el.selectionStart=el.selectionEnd=s+t.length;fire(el);return 'ok';}"
+         "if(el&&el.isContentEditable){try{document.execCommand('insertText',false,t);}catch(_){}"
+         "return 'ok';}"
+         "return 'no-focus';})(%@)", jsonArray];
+
+    __weak typeof(self) weakSelf = self;
+    [self.webView evaluateJavaScript:js completionHandler:^(id result, NSError *error) {
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self) return;
+        BOOL ok = [result isKindOfClass:[NSString class]] && [result isEqualToString:@"ok"];
+        if (ok) return;
+        [UIPasteboard generalPasteboard].string = text;
+        [self toast:@"没有聚焦的输入框，已复制到剪贴板，长按粘贴"];
     }];
 }
 

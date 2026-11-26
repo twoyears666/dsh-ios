@@ -43,6 +43,9 @@
         [self action:@"重新加载" image:@"arrow.clockwise" act:DSHMenuActionReload disabled:NO],
         [self action:@"在 Safari 打开" image:@"safari" act:DSHMenuActionOpenInSafari disabled:NO],
         [self action:@"复制 URL" image:@"doc.on.doc" act:DSHMenuActionCopyURL disabled:NO],
+        // 语音输入：mac 桌面端走 sherpa-onnx，iOS 没有产物，
+        // 这里用系统 SFSpeechRecognizer（不占体积、中文可用）
+        [self action:@"语音输入" image:@"mic" act:DSHMenuActionVoice disabled:NO],
     ]];
 
     UIMenu *system = [UIMenu menuWithTitle:@"内核"

@@ -213,10 +213,30 @@ App 通过 `posix_spawn` + `POSIX_SPAWN_SETSID` 拉起的内核已经脱离进�
 | 功能 | 原因 | 计划 |
 |---|---|---|
 | **Office 渲染/转换** | `libreoffice-kit` 只有 macOS 原生包（140 MB `dsoffice`）和 wasm 版（143 MB `dsoffice.wasm` + `dsoffice.data`） | 纯文本处理走 Python（`python-docx` / `openpyxl` / `python-pptx`） |
-| **语音转文字** | `sherpa-onnx` 无 iOS 产物 | 改用 iOS 原生 `SFSpeechRecognizer`（Speech framework） |
 | **Computer Use**（桌面应用操控） | `dsh-experimental-cua-macos` 是 macOS 原生实现 | 移植 yithcen 的 `phone-bridge`（SpringBoard 注入，操控整个手机） |
 | **托盘图标** | iOS 无托盘概念 | 用灵动岛/角标替代 |
 | **自动更新** | iOS 无 autoUpdater | 走 Sileo |
+
+### 语音输入（已实现，替代 sherpa-onnx）
+
+mac 桌面端的语音转文字用 `sherpa-onnx`，没有 iOS 产物。
+iOS 上改用系统自带的 **Speech framework**（`SFSpeechRecognizer`）：
+
+| 项 | 说明 |
+|---|---|
+| 入口 | 右上角菜单 → 视图 → **语音输入**（再点一次结束） |
+| 录音 | `AVAudioEngine` + `AVAudioSession`（`PlayAndRecord` / `Measurement`） |
+| 识别 | `SFSpeechRecognizer`，优先 `zh-CN`，没有中文模型时退回系统语言 |
+| 结果 | 边说边出字；最终文字插进当前聚焦的输入框 |
+| 插不进去 | 自动复制到剪贴板并提示「长按粘贴」 |
+| 体积 | 0 —— 不带任何模型文件，也不加依赖 |
+
+限制：
+
+- 需要联网（除非系统装了本地识别模型）
+- 单次识别约 60 秒上限（系统限制），说完再点一次即可
+- 需要 `NSMicrophoneUsageDescription` + `NSSpeechRecognitionUsageDescription`，
+  缺任一条 iOS 会直接 crash —— `build-app.sh` 会在编译期拦住
 
 ### 降级可用
 
@@ -226,6 +246,7 @@ App 通过 `posix_spawn` + `POSIX_SPAWN_SETSID` 拉起的内核已经脱离进�
 | **图片处理** | 只读尺寸/格式 | 不做缩放、转码、滤镜；超过请求尺寸时按原图返回 |
 | **内核级沙箱** | 软限制（纯 JS） | 无 landlock（Linux 专属）；不要依赖它做安全边界 |
 | **搜索（grep/glob）** | 依赖系统 `rg` | 需 `apt install ripgrep`（Procursus 有 12.1.1-1） |
+| **语音输入** | 走系统识别服务 | 不占体积，但受系统 60 秒 / 联网限制；见上节 |
 
 ### 平台专属（不算缺失）
 

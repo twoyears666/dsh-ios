@@ -24,6 +24,7 @@ typedef NS_ENUM(NSInteger, DSHMenuAction) {
     DSHMenuActionStopKernel,
     DSHMenuActionToggleKeepAlive,
     DSHMenuActionClearProcess,
+    DSHMenuActionVoice,
     DSHMenuActionAbout,
 };
 

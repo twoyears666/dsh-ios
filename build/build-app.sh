@@ -63,6 +63,9 @@ LDFLAGS=(
     -framework WebKit
     -framework CoreGraphics
     -framework UniformTypeIdentifiers
+    # 语音输入（SFSpeechRecognizer）：录音走 AVAudioEngine，识别走 Speech
+    -framework AVFoundation
+    -framework Speech
 )
 
 SOURCES=(
@@ -74,6 +77,7 @@ SOURCES=(
     "$SRC/DSHShell.m"
     "$SRC/DSHBrowserBridge.m"
     "$SRC/DSHBrowserControl.m"
+    "$SRC/DSHVoice.m"
 )
 
 for f in "${SOURCES[@]}"; do
@@ -138,6 +142,14 @@ fi
 log "校验产物"
 [ -f "$APP/DSH" ] || die "可执行文件缺失"
 [ -f "$APP/Info.plist" ] || die "Info.plist 缺失"
+
+# 语音输入的两条用途说明缺一不可：iOS 在申请权限时会直接 crash，
+# 而且崩在设备上很难看出原因，这里提前拦住。
+for k in NSMicrophoneUsageDescription NSSpeechRecognitionUsageDescription; do
+    v=$(/usr/libexec/PlistBuddy -c "Print :$k" "$APP/Info.plist" 2>/dev/null || true)
+    [ -n "$v" ] || die "Info.plist 缺 $k（语音输入会崩溃）"
+done
+log "  语音权限说明: OK"
 
 # 确认是 iOS 平台 Mach-O
 python3 - "$APP/DSH" <<'PY' || die "产物不是 iOS arm64"

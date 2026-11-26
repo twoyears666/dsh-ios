@@ -120,5 +120,11 @@
     <!-- 越狱环境下需要读 /var/jb 下的文件 -->
     <key>NSLocalNetworkUsageDescription</key>
     <string>连接本机运行的 DeepSeek Harness 内核</string>
+
+    <!-- 语音输入。iOS 强制要求：缺这两条会在申请权限时直接崩溃。 -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>语音输入需要麦克风，把你说的话转成文字填进输入框</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>语音输入使用系统语音识别把录音转成文字</string>
 </dict>
 </plist>
