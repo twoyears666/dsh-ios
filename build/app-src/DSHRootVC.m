@@ -132,6 +132,7 @@ static BOOL DSHProbeKernel(NSString *host, NSInteger port) {
 @property (nonatomic, strong) UIButton *reloadButton;
 @property (nonatomic, strong) UISwitch *keepAliveSwitch;
 @property (nonatomic, strong) UILabel *keepAliveLabel;
+@property (nonatomic, strong) UIButton *clearProcessButton;
 @property (nonatomic, strong) UIView *loadingOverlay;
 
 @property (nonatomic, strong) NSMutableArray<NSDictionary *> *sessions;
@@ -151,6 +152,7 @@ static BOOL DSHProbeKernel(NSString *host, NSInteger port) {
 - (void)keepAliveSwitchChanged:(UISwitch *)sw;
 - (void)ctl:(NSString *)subcommand message:(NSString *)message;
 - (void)confirmStopKernel;
+- (void)confirmClearProcess;
 - (void)refreshMenu;
 - (BOOL)keepAliveEnabled;
 - (void)ensureKernelRunning;
@@ -297,8 +299,21 @@ static BOOL DSHProbeKernel(NSString *host, NSInteger port) {
     self.keepAliveLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
     self.keepAliveLabel.textColor = [UIColor secondaryLabelColor];
 
+    // 清除进程：紧跟在保活开关下面。
+    // 用途：更新版本后旧内核还占着端口，或者内核卡死点不动了。
+    // 行为：关掉保活 + 杀干净内核进程（clear 子命令），之后不会自动拉起。
+    self.clearProcessButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    [self.clearProcessButton setTitle:@"清除进程" forState:UIControlStateNormal];
+    self.clearProcessButton.titleLabel.font =
+        [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
+    [self.clearProcessButton setTitleColor:[UIColor systemRedColor] forState:UIControlStateNormal];
+    [self.clearProcessButton addTarget:self
+                                action:@selector(confirmClearProcess)
+                      forControlEvents:UIControlEventTouchUpInside];
+
     for (UIView *v in @[self.spinner, self.statusLabel, self.reloadButton,
-                        self.keepAliveSwitch, self.keepAliveLabel]) {
+                        self.keepAliveSwitch, self.keepAliveLabel,
+                        self.clearProcessButton]) {
         v.translatesAutoresizingMaskIntoConstraints = NO;
         [self.loadingOverlay addSubview:v];
     }
@@ -321,6 +336,10 @@ static BOOL DSHProbeKernel(NSString *host, NSInteger port) {
 
         [self.keepAliveLabel.trailingAnchor constraintEqualToAnchor:self.keepAliveSwitch.leadingAnchor constant:-10],
         [self.keepAliveLabel.centerYAnchor constraintEqualToAnchor:self.keepAliveSwitch.centerYAnchor],
+
+        [self.clearProcessButton.topAnchor constraintEqualToAnchor:self.keepAliveSwitch.bottomAnchor constant:12],
+        [self.clearProcessButton.centerXAnchor constraintEqualToAnchor:safe.centerXAnchor],
+        [self.clearProcessButton.heightAnchor constraintEqualToConstant:36],
     ]];
 
     // ---- UISplitViewController（iPad / iPhone 自适应）----
@@ -1138,6 +1157,10 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
             break;
         }
 
+        case DSHMenuActionClearProcess:
+            [self confirmClearProcess];
+            break;
+
         case DSHMenuActionAbout: {
             NSString *ver = [[NSBundle mainBundle]
                              objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?";
@@ -1244,6 +1267,25 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
 
     // iPad 需要 popover 锚点
     a.popoverPresentationController.barButtonItem = self.navigationItem.rightBarButtonItem;
+    [self presentViewController:a animated:YES completion:nil];
+}
+
+/// 清除进程前确认
+- (void)confirmClearProcess {
+    UIAlertController *a = [UIAlertController
+        alertControllerWithTitle:@"清除进程"
+                         message:@"会关闭后台保活，并强制杀掉所有内核进程。\n"
+                                 @"正在运行的任务会被中断，之后不会自动拉起。\n"
+                                 @"适用场景：更新版本后旧内核还占着端口。"
+                  preferredStyle:UIAlertControllerStyleActionSheet];
+    [a addAction:[UIAlertAction actionWithTitle:@"清除" style:UIAlertActionStyleDestructive
+                                        handler:^(UIAlertAction *_) {
+        [self ctl:@"clear" message:@"正在清除内核进程…"];
+    }]];
+    [a addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+
+    a.popoverPresentationController.sourceView = self.clearProcessButton;
+    a.popoverPresentationController.sourceRect = self.clearProcessButton.bounds;
     [self presentViewController:a animated:YES completion:nil];
 }
 

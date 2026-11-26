@@ -44,6 +44,11 @@ export DSH_WORKSPACES_DIR="${DSH_WORKSPACES_DIR:-$DSH_ROOT/workspaces}"
 export DSH_LOG_DIR="${DSH_LOG_DIR:-$DSH_ROOT/logs}"
 export DSH_CACHE_DIR="${DSH_CACHE_DIR:-$DSH_ROOT/cache}"
 
+# 内核 PID 记录：dsh-ctl 靠它精确杀进程。
+# 光靠 pkill -f 匹配 argv 不可靠（App posix_spawn 起的、preboot 解析后的路径都可能不同）。
+PIDFILE="$DSH_ROOT/config/kernel.pid"
+export PIDFILE
+
 for _d in "$DSH_HOME" "$DSH_CONFIG_DIR" "$DSH_WORKSPACES_DIR" "$DSH_LOG_DIR" "$DSH_CACHE_DIR"; do
     mkdir -p "$_d" 2>/dev/null || true
 done
@@ -128,6 +133,7 @@ case "$1" in
         "$NODE" $TIER_ARGS $TIER_SQLITE_ARGS $DSH_NODE_FLAGS \
              --expose-internals "$BIN" "$@" >>"$LOG" 2>&1 &
         DSHPID=$!
+        printf '%s\n' "$DSHPID" >"$PIDFILE" 2>/dev/null || true
 
         # tail 回显（dsh 退出时 tail 会因 SIGPIPE 自动结束）
         tail -n +1 -f "$LOG" 2>/dev/null &
@@ -151,7 +157,11 @@ case "$RC" in
             printf '%s\n' "nowasm" > "$TIER_CACHE" 2>/dev/null || true
             TIER_ARGS=$(tier_args_for nowasm)
             if [ "$1" = "web" ]; then
-                run_dsh "$@" >>"$DSH_LOG_DIR/web.log" 2>&1
+                # 降级重试也要记 pid，否则 dsh-ctl 又只能靠 pkill 猜
+                run_dsh "$@" >>"$DSH_LOG_DIR/web.log" 2>&1 &
+                DSHPID=$!
+                printf '%s\n' "$DSHPID" >"$PIDFILE" 2>/dev/null || true
+                wait "$DSHPID"
                 RC=$?
                 # 把降级后的日志也回显出来
                 tail -n 30 "$DSH_LOG_DIR/web.log" 2>/dev/null || true

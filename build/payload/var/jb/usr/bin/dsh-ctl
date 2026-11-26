@@ -5,6 +5,7 @@
 #   dsh-ctl status      查看状态
 #   dsh-ctl start       启动内核
 #   dsh-ctl stop        停止内核（并关掉保活，防止被拉起）
+#   dsh-ctl clear       强制清除内核进程（关保活 + 杀进程 + 等端口释放）
 #   dsh-ctl restart     重启内核
 #   dsh-ctl enable      开启保活（开机自启 + 崩溃自动拉起）
 #   dsh-ctl disable     关闭保活（不阻止手动启动）
@@ -21,6 +22,7 @@ ROOT=/var/mobile/Media/deepseek-harness
 LABEL=com.twoyears.dsh
 PLIST="$JB/Library/LaunchDaemons/$LABEL.plist"
 FLAG="$ROOT/config/keepalive.disabled"
+PIDFILE="$ROOT/config/kernel.pid"
 LOG="$ROOT/logs/ctl.log"
 
 mkdir -p "$(dirname "$FLAG")" "$ROOT/logs" 2>/dev/null || true
@@ -68,6 +70,15 @@ cmd_status() {
     if [ -f "$ROOT/logs/web.log" ]; then
         U=$(grep -o "http://[0-9.]*:[0-9]*/?token=[A-Za-z0-9_-]*" "$ROOT/logs/web.log" 2>/dev/null | tail -1)
         [ -n "$U" ] && say "  URL:     $U"
+    fi
+
+    # 版本：装的是什么 + 日志最后写入时间。
+    # 两者对不上就说明跑着的还是旧内核（日志没被新进程重写过）。
+    if [ -f "$D/VERSION" ]; then
+        say "  版本:    $(sed -n '1p' "$D/VERSION" 2>/dev/null)"
+    fi
+    if [ -f "$ROOT/logs/web.log" ]; then
+        say "  日志:    $(date -r "$ROOT/logs/web.log" '+%Y-%m-%d %H:%M' 2>/dev/null || echo '?')"
     fi
     return 0
 }
@@ -123,14 +134,72 @@ cmd_stop() {
     fi
 
     # 兜底：杀掉残留进程
-    pkill -f "$D/node_modules/@deepseek-ai/dsh/lib/bin.js" 2>/dev/null || true
+    #
+    # 这里不能用 "$D/node_modules/..." 这种绝对路径做模式 ——
+    # 内核可能是 App 用 posix_spawn 起的，也可能是 /var/jb/usr/bin/dsh
+    # 经 preboot 符号链接解析后执行的，argv 里的路径和 $D 不一致，
+    # 旧模式匹配不到，于是「停不掉」。改用与路径无关的子串。
+    kill_kernels
 
-    sleep 1
+    wait_port_free || return 1
+    say "内核已停止"
+    return 0
+}
+
+# 杀干净所有 dsh 内核进程（不管是谁起的、路径长什么样）
+# dsh-ctl 只能用 date / nc / pkill / sed，不要引入 fuser / lsof / pgrep。
+kill_kernels() {
+    # 1) 优先用 pidfile（launcher 写入，最准）
+    if [ -f "$PIDFILE" ]; then
+        _p=$(sed -n '1p' "$PIDFILE" 2>/dev/null)
+        case "$_p" in
+            ''|*[!0-9]*) ;;
+            *) kill "$_p" 2>/dev/null || true ;;
+        esac
+    fi
+
+    # 2) 按 argv 子串扫。'dsh/lib/bin.js' 能同时命中：
+    #    /var/jb/usr/lib/dsh/node_modules/@deepseek-ai/dsh/lib/bin.js
+    #    /private/preboot/<uuid>/.../dsh/lib/bin.js
+    pkill -f 'dsh/lib/bin.js' 2>/dev/null || true
+
+    # 3) 连 launcher 外壳一起收掉，避免它把子进程重新拉起
+    pkill -f "$JB/usr/bin/dsh web" 2>/dev/null || true
+
+    rm -f "$PIDFILE" 2>/dev/null || true
+}
+
+# 等端口真正释放；先 TERM 再 KILL，最多约 6 秒
+wait_port_free() {
+    _i=0
+    while [ "$_i" -lt 3 ]; do
+        is_running || return 0
+        # 还没退：升级到 SIGKILL 再扫一遍
+        pkill -9 -f 'dsh/lib/bin.js' 2>/dev/null || true
+        pkill -9 -f "$JB/usr/bin/dsh web" 2>/dev/null || true
+        sleep 1
+        _i=$((_i + 1))
+    done
     if is_running; then
         say "⚠ 端口 $(port) 仍在监听，可能有其它实例" >&2
+        say "  可执行 dsh-ctl status 查看，或用 Sileo 重启设备" >&2
         return 1
     fi
-    say "内核已停止"
+    return 0
+}
+
+# 强制清除：比 stop 更彻底，且明确「不要保活」。
+# 用于「更新版本后旧内核还占着端口」或「App 里点清除进程」。
+# 与 restart 的区别：restart 会恢复原来的保活状态，clear 不会。
+cmd_clear() {
+    logline "clear"
+    cmd_stop
+    RC=$?
+    rm -f "$PIDFILE" 2>/dev/null || true
+    if [ "$RC" -ne 0 ]; then
+        return "$RC"
+    fi
+    say "保活已关闭，内核进程已清除。"
     return 0
 }
 
@@ -211,12 +280,13 @@ case "${1:-status}" in
     status)  cmd_status ;;
     start)   cmd_start ;;
     stop)    cmd_stop ;;
+    clear)   cmd_clear ;;
     restart) cmd_restart ;;
     enable)  cmd_enable ;;
     disable) cmd_disable ;;
     browser) cmd_browser "$@" ;;
     *)
-        say "用法: dsh-ctl {status|start|stop|restart|enable|disable|browser [on|off|status]}" >&2
+        say "用法: dsh-ctl {status|start|stop|clear|restart|enable|disable|browser [on|off|status]}" >&2
         exit 2
         ;;
 esac

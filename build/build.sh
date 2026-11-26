@@ -127,6 +127,11 @@ cp -R "$NM/." "$JB/usr/lib/dsh/"
 # 清掉提取时带入的 mac 专用元数据文件（保留 package.json）
 rm -f "$JB/usr/lib/dsh/desktop-runtime.json"
 
+# 3.2.1 版本戳：App / dsh-ctl 靠它判断「跑着的内核是不是当前装的版本」
+# 之前完全没有运行时版本记录，旧内核占着端口时根本发现不了。
+printf '%s\n' "$PKGVER" > "$JB/usr/lib/dsh/VERSION"
+printf '%s\n' "$VERSION" > "$JB/usr/lib/dsh/KERNEL_VERSION"
+
 # 3.3 pnpm（纯 JS 发行版）
 PNPM_SRC="$APP/Contents/Resources/runtime/primary-runtime/dependencies/pnpm"
 if [ -d "$PNPM_SRC" ]; then

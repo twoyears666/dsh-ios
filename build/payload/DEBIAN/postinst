@@ -107,7 +107,37 @@ fi
 
 # ---------------------------------------------------------------- 5. launchd
 PLIST="$JB/Library/LaunchDaemons/com.twoyears.dsh.plist"
+
+# 5.1 先杀干净旧内核
+#
+# 只 bootout 是不够的：bootout 只收掉 launchd 自己监督的那个进程。
+# 如果旧内核是 App 通过 posix_spawn 起的（POSIX_SPAWN_SETSID 已经脱离
+# 进程组），它根本不归 launchd 管，bootout 之后照样占着 3080 端口。
+# 新 App 起来后探测端口发现「已通」就直接复用 —— 于是跑的还是旧版本，
+# 表现就是「更新了但没生效、日志也不刷新」。
+#
+# 所以这里必须按端口/argv 兜底扫一遍。
+export PATH="$JB/usr/bin:$JB/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+if [ -x "$JB/usr/bin/dsh-ctl" ]; then
+    "$JB/usr/bin/dsh-ctl" clear >/dev/null 2>&1 || true
+else
+    pkill -f 'dsh/lib/bin.js' 2>/dev/null || true
+    pkill -f "$JB/usr/bin/dsh web" 2>/dev/null || true
+    sleep 1
+    pkill -9 -f 'dsh/lib/bin.js' 2>/dev/null || true
+    pkill -9 -f "$JB/usr/bin/dsh web" 2>/dev/null || true
+fi
+rm -f "$ROOT/config/kernel.pid" 2>/dev/null || true
+
+# 5.2 版本戳：让 App / dsh-ctl 能看出当前装的是哪个版本
+if [ -f "$D/VERSION" ]; then
+    cp "$D/VERSION" "$ROOT/config/installed.version" 2>/dev/null || true
+fi
+
+# 5.3 重新注册（clear 会把 launchd 置为 disabled，这里恢复默认自启）
 if [ -f "$PLIST" ]; then
+    launchctl enable "system/com.twoyears.dsh" 2>/dev/null || true
+    rm -f "$ROOT/config/keepalive.disabled" 2>/dev/null || true
     launchctl bootout system "$PLIST" 2>/dev/null || true
     launchctl bootstrap system "$PLIST" 2>/dev/null \
         || launchctl load -w "$PLIST" 2>/dev/null || true

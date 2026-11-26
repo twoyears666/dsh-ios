@@ -1,7 +1,23 @@
 #!/bin/sh
 # prerm —— 卸载前停服务，但保留用户数据
-PLIST=/var/jb/Library/LaunchDaemons/com.twoyears.dsh.plist
+#
+# 注意：这里必须比 bootout 更狠。
+# bootout 只能收掉 launchd 监督的那个进程；App 用 posix_spawn 起的
+# 内核已经 POSIX_SPAWN_SETSID 脱离了进程组，不归 launchd 管，
+# 光 bootout 会让它一直占着 3080 端口活到下次重启。
+JB=/var/jb
+ROOT=/var/mobile/Media/deepseek-harness
+PLIST="$JB/Library/LaunchDaemons/com.twoyears.dsh.plist"
+
+export PATH="$JB/usr/bin:$JB/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+if [ -x "$JB/usr/bin/dsh-ctl" ]; then
+    "$JB/usr/bin/dsh-ctl" clear >/dev/null 2>&1 || true
+fi
 [ -f "$PLIST" ] && launchctl bootout system "$PLIST" 2>/dev/null || true
+pkill -f 'dsh/lib/bin.js' 2>/dev/null || true
+pkill -f "$JB/usr/bin/dsh web" 2>/dev/null || true
+rm -f "$ROOT/config/kernel.pid" 2>/dev/null || true
 
 echo ""
 echo "已卸载 DeepSeek Harness。"
