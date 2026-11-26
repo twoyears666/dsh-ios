@@ -22,6 +22,12 @@
 @property (nonatomic, assign) BOOL tapInstalled;
 /// 防止「final 结果」和「停止后的兜底交付」重复插入同一段文字
 @property (nonatomic, assign) BOOL delivered;
+/// 权限申请是异步的：连点两下会起两个会话，这里挡住第二次
+@property (nonatomic, assign) BOOL starting;
+/// 每次会话一个号。停止后的 3 秒兜底要靠它判断
+/// 「我等的是不是同一个会话」，否则用户停完立刻重开，
+/// 兜底会把新会话的中间结果当成最终结果交出去。
+@property (nonatomic, assign) NSUInteger sessionId;
 @end
 
 @implementation DSHVoice
@@ -78,7 +84,8 @@
 }
 
 - (void)start {
-    if (self.recording) return;
+    if (self.recording || self.starting) return;
+    self.starting = YES;
 
     __weak typeof(self) weakSelf = self;
 
@@ -87,6 +94,7 @@
         __strong typeof(weakSelf) self = weakSelf;
         if (!self) return;
         if (status != SFSpeechRecognizerAuthorizationStatusAuthorized) {
+            self.starting = NO;
             [self fail:[self messageForSpeechStatus:status]];
             return;
         }
@@ -96,6 +104,7 @@
             __strong typeof(weakSelf) self = weakSelf;
             if (!self) return;
             if (!granted) {
+                self.starting = NO;
                 [self fail:@"麦克风权限被拒绝。\n设置 → 隐私 → 麦克风 → 打开 DeepSeek Harness。"];
                 return;
             }
@@ -117,11 +126,15 @@
 
     // 正常情况下 final 结果几百毫秒内就到；
     // 没网 / 识别器卡住时用最后的 partial 兜底，别让用户白说一遍。
+    NSUInteger waiting = self.sessionId;
     __weak typeof(self) weakSelf = self;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         __strong typeof(weakSelf) self = weakSelf;
-        if (!self || self.delivered) return;
+        if (!self) return;
+        // 这 3 秒里用户可能又开了一次录音 —— 别把新会话的内容交出去
+        if (self.sessionId != waiting) return;
+        if (self.delivered) return;
         [self deliverFinal];
     });
 }
@@ -129,6 +142,10 @@
 #pragma mark - 会话
 
 - (void)beginSession {
+    self.starting = NO;
+    self.sessionId += 1;
+    NSUInteger mySession = self.sessionId;
+
     NSError *err = nil;
     AVAudioSession *session = [AVAudioSession sharedInstance];
 
@@ -166,6 +183,8 @@
                                                             NSError *error) {
         __strong typeof(weakSelf) self = weakSelf;
         if (!self) return;
+        // 旧会话（用户停掉后又开了一次）的结果直接丢弃
+        if (self.sessionId != mySession) return;
 
         if (result) {
             NSString *text = result.bestTranscription.formattedString;
@@ -255,6 +274,15 @@
     if (self.delivered) return;
     self.delivered = YES;
 
+    // 识别器自己判 final 的情况（比如静音太久、到了 60 秒上限）：
+    // 这时麦克风还开着，必须收掉，否则 recording=NO 之后
+    // stop 会直接 return，音频永远停不下来。
+    if (self.recording) {
+        self.recording = NO;
+        [self teardownAudio];
+        [self.request endAudio];
+    }
+
     NSString *text = [self.lastPartial
                       stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     self.lastPartial = nil;
@@ -269,6 +297,7 @@
 
 - (void)fail:(NSString *)message {
     self.recording = NO;
+    self.starting = NO;
     [self teardownAudio];
     dispatch_async(dispatch_get_main_queue(), ^{
         if (self.onError) self.onError(message);
