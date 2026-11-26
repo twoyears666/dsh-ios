@@ -129,16 +129,56 @@ agent → browser_*  →  HTTP POST 127.0.0.1:3081/browser
 ### 内核控制
 
 ```sh
-dsh-ctl status                  # 运行中 / 保活 / launchd / URL
+dsh-ctl status                  # 运行中 / 保活 / launchd / URL / 版本 / 外壳
 dsh-ctl start                   # 启动
 dsh-ctl stop                    # 停止（同时关保活）
+dsh-ctl clear                   # 强制清除进程（关保活 + 杀干净 + 等端口释放）
 dsh-ctl restart                 # 重启（不改变保活设置）
 dsh-ctl enable                  # 开启后台保活
 dsh-ctl disable                 # 关闭保活
 dsh-ctl browser on|off|status   # agent 浏览器权限
 ```
 
-App 里也有触控入口：右上角菜单 + 加载界面的保活开关。
+**App 里的触控入口**（不需要终端）：
+
+| 位置 | 控件 | 作用 |
+|---|---|---|
+| 右上角菜单 → 内核 | 启动 / 停止 / 重启 | 常规控制 |
+| 右上角菜单 → 内核 | **清除进程** | 关保活 + 杀光内核进程，用于「升级后旧内核还占着端口」 |
+| 右上角菜单 → 内核 | 运行自检 | 跑 `dsh-doctor` |
+| 加载界面 | 后台保活 开关 | 只控制后台保活 |
+| 加载界面 | **清除进程** 按钮 | 同菜单项 |
+
+`clear` 与其它命令的区别：
+
+- `stop` —— 停服务并关保活，但保留 launchd 注册（下次开机仍会自启）
+- `disable` —— 只关保活，不动正在跑的进程
+- `restart` —— 重启，**会恢复**原来的保活状态
+- `clear` —— 关保活 + 杀进程 + **不会**恢复保活；专治「旧版本内核占着 3080」
+
+### 升级时自动停掉旧内核
+
+`postinst` 会先执行 `dsh-ctl clear` 再重新注册 launchd。只 `bootout` 是不够的：
+App 通过 `posix_spawn` + `POSIX_SPAWN_SETSID` 拉起的内核已经脱离进程组，
+不归 launchd 管，`bootout` 之后照样占着 3080 端口 ——
+新 App 探测到端口已通就直接复用，表现就是「更新了但没生效」。
+
+扫描只针对**本移植版**（模式是完整安装路径
+`/var/jb/usr/lib/dsh/node_modules/@deepseek-ai/dsh/lib/bin.js`），
+不会误杀设备上用 npm 全局安装的 dsh 或别的越狱包。
+
+### 日志
+
+| 文件 | 内容 |
+|---|---|
+| `logs/app.log` | **外壳自己的启动记录**（含「=== App 启动 外壳 X 内核 Y ===」） |
+| `logs/web.log` | 内核输出，含带 token 的访问 URL |
+| `logs/app-spawn.log` | 内核由 App 拉起时的 stdout/stderr |
+| `logs/dsh-daemon.log` | launchd 拉起时的 stdout（通常被 `web.log` 覆盖，0 字节属正常） |
+| `logs/ctl.log` | 每次 `dsh-ctl` 操作的时间戳记录 |
+
+`dsh-ctl status` 会把 `版本`（装的是哪个 deb）和 `外壳`（App 上次启动记录的内核号）
+并排打出来；两者对不上就说明跑着的还是旧内核。
 
 ---
 
@@ -310,7 +350,26 @@ token 抓取路径或 URL 拼接问题。App 会：
 ```sh
 cat /var/mobile/Media/deepseek-harness/logs/web.log
 cat /var/mobile/Media/deepseek-harness/logs/app-spawn.log
+cat /var/mobile/Media/deepseek-harness/logs/app.log
 ```
+
+### 更新了但没生效（还是旧界面 / 日志不刷新）
+
+典型症状：Sileo 显示已装新版本，但 App 打开还是老样子，
+`web.log` 的修改时间停在升级之前。
+
+原因：旧内核进程没死。App 探测到 3080 端口已通就直接复用，
+于是新 App 连的是老内核。App 用 `posix_spawn` 拉起的内核脱离了进程组，
+`launchctl bootout` 管不到它。
+
+处理（不用终端）：
+
+1. 右上角菜单 → 内核 → **清除进程**
+2. 重新打开 App
+
+`postinst` 现在会在安装时自动做这一步，正常情况下不该再遇到；
+遇到了就是有别的进程占着 3080，`dsh-ctl status` 会提示
+`⚠ 端口 3080 仍在监听，可能有其它实例`。
 
 ---
 

@@ -17,15 +17,46 @@ permissions:
   contents: write
 
 env:
+  # 上游 dsh 内核版本（用于 npm 安装）
   DSH_VERSION: ${{ github.event.inputs.dsh_version || '0.2.2-rc.5' }}
   NODE_IOS_URL: https://github.com/yitenchen123/dsh-ios/releases/download/node24-exp/node-v24.19.0-iphoneos-arm64-jit
   NODE_IOS_SHA: 8bebb2a2e45824f9880ac99141ce0ee9359ec4fad72ccd1ef27bcd1341d77697
 
 jobs:
   # ==========================================================================
+  # 0. 计算版本号
+  # ==========================================================================
+  # 包版本必须每次构建都不同，否则 Sileo 认为「已是最新」不重装，
+  # 而且装上去之后也没法从版本号看出是哪次构建。
+  # 规则：
+  #   tag v0.2.2-rc.5   -> 0.2.2-rc.5+ios1        （正式版，干净版本号）
+  #   其它（main push） -> 0.2.2-rc.5+ios1.g<sha7>.<runnum>
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      pkgver: ${{ steps.v.outputs.pkgver }}
+      kernel: ${{ steps.v.outputs.kernel }}
+    steps:
+      - id: v
+        run: |
+          KERNEL="${{ github.event.inputs.dsh_version || '0.2.2-rc.5' }}"
+          SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            # 从 tag 里取内核版本，tag 就是权威
+            KERNEL="${GITHUB_REF_NAME#v}"
+            PKGVER="${KERNEL}+ios1"
+          else
+            PKGVER="${KERNEL}+ios1.g${SHA}.${{ github.run_number }}"
+          fi
+          echo "kernel=$KERNEL" >> "$GITHUB_OUTPUT"
+          echo "pkgver=$PKGVER"  >> "$GITHUB_OUTPUT"
+          echo "内核版本: $KERNEL"
+          echo "包版本:   $PKGVER"
+  # ==========================================================================
   # 1. 编译原生 App（macOS runner 自带 iOS SDK）
   # ==========================================================================
   build-app:
+    needs: version
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -42,6 +73,10 @@ jobs:
         run: brew install ldid || echo "(ldid 安装失败，postinst 会补签)"
 
       - name: 编译 DSH.app
+        env:
+          DSH_PKGVER: ${{ needs.version.outputs.pkgver }}
+          # CFBundleVersion 只允许数字和点
+          DSH_BUILD: ${{ github.run_number }}
         run: |
           chmod +x build/build-app.sh
           bash build/build-app.sh build/app
@@ -68,6 +103,7 @@ jobs:
   # 2. 构建 CLI + 依赖树（ubuntu，用 Python 生成 deb）
   # ==========================================================================
   build-cli:
+    needs: version
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -173,15 +209,21 @@ jobs:
           install -m 644 build/shims/ios-image-shim.mjs "$JB/usr/lib/dsh/ios-image-shim.mjs"
           find "$JB" -name '*.node' -delete
 
+          # 版本戳：App / dsh-ctl 靠它判断「跑着的内核是不是当前装的版本」。
+          # 没有这个文件时，旧内核占着端口根本发现不了。
+          printf '%s\n' "${{ needs.version.outputs.pkgver }}" \
+              > "$JB/usr/lib/dsh/VERSION"
+          printf '%s\n' "${{ needs.version.outputs.kernel }}" \
+              > "$JB/usr/lib/dsh/KERNEL_VERSION"
+
       - name: 生成 DEBIAN 控制文件
         run: |
           mkdir -p build/root/DEBIAN
           SIZE=$(du -sk build/root | awk '{print $1}')
-          SIZE=$(du -sk build/root | awk '{print $1}')
           {
             printf 'Package: com.twoyears.dsh\n'
             printf 'Name: DeepSeek Harness\n'
-            printf 'Version: %s+ios1\n' "${DSH_VERSION}"
+            printf 'Version: %s\n' "${{ needs.version.outputs.pkgver }}"
             printf 'Architecture: iphoneos-arm64\n'
             printf 'Section: Development\n'
             printf 'Priority: optional\n'
@@ -213,7 +255,7 @@ jobs:
   # 3. 合并 CLI + GUI，产出最终 deb
   # ==========================================================================
   package:
-    needs: [build-cli, build-app]
+    needs: [version, build-cli, build-app]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -299,7 +341,7 @@ jobs:
       - name: 打包 deb
         run: |
           mkdir -p build/dist
-          python3 build/tools/mkdeb.py build/root "build/dist/com.twoyears.dsh_${DSH_VERSION}+ios1_iphoneos-arm64.deb"
+          python3 build/tools/mkdeb.py build/root "build/dist/com.twoyears.dsh_${{ needs.version.outputs.pkgver }}_iphoneos-arm64.deb"
 
       - name: 验证 deb
         run: |
@@ -332,7 +374,7 @@ jobs:
           name: Latest build
           body: |
             自动构建，来自 main 分支 ${{ github.sha }}
-            版本 ${{ env.DSH_VERSION }}
+            版本 ${{ needs.version.outputs.pkgver }}
           files: build/dist/*.deb
           prerelease: true
           make_latest: false

@@ -116,15 +116,20 @@ PLIST="$JB/Library/LaunchDaemons/com.twoyears.dsh.plist"
 # 新 App 起来后探测端口发现「已通」就直接复用 —— 于是跑的还是旧版本，
 # 表现就是「更新了但没生效、日志也不刷新」。
 #
-# 所以这里必须按端口/argv 兜底扫一遍。
+# 所以这里必须按 argv 兜底扫一遍。
+#
+# 只扫「我们自己这一份」：模式用完整安装路径，
+# 不用 'dsh/lib/bin.js' 这种宽子串 —— 设备上可能还装着
+# npm 全局的 dsh 或别的越狱包，升级我们不应该把它们杀掉。
 export PATH="$JB/usr/bin:$JB/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+KERNEL_ARGV="$D/node_modules/@deepseek-ai/dsh/lib/bin.js"
 if [ -x "$JB/usr/bin/dsh-ctl" ]; then
     "$JB/usr/bin/dsh-ctl" clear >/dev/null 2>&1 || true
 else
-    pkill -f 'dsh/lib/bin.js' 2>/dev/null || true
+    pkill -f "$KERNEL_ARGV" 2>/dev/null || true
     pkill -f "$JB/usr/bin/dsh web" 2>/dev/null || true
     sleep 1
-    pkill -9 -f 'dsh/lib/bin.js' 2>/dev/null || true
+    pkill -9 -f "$KERNEL_ARGV" 2>/dev/null || true
     pkill -9 -f "$JB/usr/bin/dsh web" 2>/dev/null || true
 fi
 rm -f "$ROOT/config/kernel.pid" 2>/dev/null || true

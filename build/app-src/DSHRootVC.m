@@ -23,6 +23,9 @@
 #import <netinet/in.h>
 #import <arpa/inet.h>
 #import <unistd.h>
+#import <signal.h>    // kill()：探测 pidfile 里的内核进程是否还活着
+#import <errno.h>     // EPERM
+#import <stdarg.h>    // va_list（App 日志）
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 #pragma mark - 常量
@@ -112,6 +115,75 @@ static BOOL DSHProbeKernel(NSString *host, NSInteger port) {
     if ([head containsString:@" 5"]) return NO;   // 5xx 说明后端有问题
     return YES;
 }
+
+/// 内核是否「已经在启动中」（进程活着但端口还没起来）。
+///
+/// 为什么需要这个：内核在 iOS 上冷启动要 20-60 秒，这段时间端口是关的。
+/// 光靠端口探测判断「没在跑」会导致重复拉起 ——
+/// launchd 的 RunAtLoad 和 App 的 ensureKernelRunning 会各起一个，
+/// 抢同一个端口，输的那个报 EADDRINUSE 退出，
+/// 然后 launchd 因为 KeepAlive 又把它拉起来，来回抖。
+///
+/// launcher 一 spawn 出 node 就把 pid 写进 pidfile，所以
+/// pidfile 里有活着的 pid 就说明「有人正在启动」，我们只等不抢。
+static BOOL DSHKernelStarting(void) {
+    NSString *path = @"/var/mobile/Media/deepseek-harness/config/kernel.pid";
+    NSString *raw = [NSString stringWithContentsOfFile:path
+                                              encoding:NSUTF8StringEncoding
+                                                 error:NULL];
+    if (raw.length == 0) return NO;
+    pid_t pid = (pid_t)raw.intValue;
+    if (pid <= 0) return NO;
+    // kill(pid, 0) 只做存在性检查，不发信号
+    if (kill(pid, 0) == 0) return YES;
+    return errno == EPERM;   // 存在但没权限 → 也算活着
+}
+
+#pragma mark - App 日志
+
+/// 把关键事件追加到 app.log，**不只是 NSLog**。
+///
+/// NSLog 在 iOS 上只进 syslog（Console.app / idevicesyslog 才看得到），
+/// 用户手上没有终端，出问题时我们什么都看不到 ——
+/// 之前「更新了但日志不刷新」排查了很久就是因为这个。
+/// 现在 App 自己的决策过程也落盘，跟 web.log 放一起，
+/// 谁都能直接翻。
+static void DSHAppLog(NSString *fmt, ...) {
+    static NSString *const path = @"/var/mobile/Media/deepseek-harness/logs/app.log";
+    static NSDateFormatter *df = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        df = [[NSDateFormatter alloc] init];
+        df.dateFormat = @"yyyy-MM-dd HH:mm:ss";
+        [[NSFileManager defaultManager] createDirectoryAtPath:
+            @"/var/mobile/Media/deepseek-harness/logs"
+                                 withIntermediateDirectories:YES attributes:nil error:NULL];
+    });
+
+    va_list ap;
+    va_start(ap, fmt);
+    NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:ap];
+    va_end(ap);
+
+    NSString *line = [NSString stringWithFormat:@"%@ [app] %@\n", [df stringFromDate:[NSDate date]], msg];
+    NSLog(@"[dsh] %@", msg);
+
+    NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    if (![fm fileExistsAtPath:path]) {
+        [data writeToFile:path atomically:NO];   // 首次创建，覆盖旧的
+        return;
+    }
+    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
+    if (!fh) return;
+    @try {
+        [fh seekToEndOfFile];
+        [fh writeData:data];
+    } @catch (NSException *e) {
+        // 日志失败绝不能影响主流程
+    }
+    [fh closeFile];
+}
 #pragma mark - DSHRootVC
 
 @interface DSHRootVC () <WKNavigationDelegate, WKUIDelegate, UITableViewDelegate, UITableViewDataSource,
@@ -173,6 +245,12 @@ static BOOL DSHProbeKernel(NSString *host, NSInteger port) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
+
+    // 启动横幅：把「这次跑的到底是哪个版本」写进日志。
+    // 升级后如果还是旧版本在服务，从这一行就能看出来。
+    DSHAppLog(@"=== App 启动 外壳 %@ 内核 %@ ===",
+              [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?",
+              [self installedKernelVersion] ?: @"(未知)");
 
     self.sessions = [NSMutableArray array];
     if (!self.baseURL) {
@@ -435,6 +513,13 @@ static BOOL DSHProbeKernel(NSString *host, NSInteger port) {
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         if (DSHProbeKernel(host, port)) return;   // 已在跑
 
+        // 端口还没起来，但可能已经有人（launchd）在启动了。
+        // 这时候再 spawn 一个就是两个内核抢一个端口，必须只等不抢。
+        if (DSHKernelStarting()) {
+            DSHAppLog(@"内核已在启动中（pidfile 有活进程），等待其就绪");
+            return;
+        }
+
         // 直接脱离启动，不依赖 launchctl。
         //
         // 为什么不用 launchctl：
@@ -467,7 +552,7 @@ static BOOL DSHProbeKernel(NSString *host, NSInteger port) {
                                      env:env
                                      pid:&pid];
 
-        NSLog(@"[dsh] spawnDetached rc=%d pid=%d", rc, pid);
+        DSHAppLog(@"spawnDetached rc=%d pid=%d log=%@", rc, pid, logPath);
 
         // 无论成败都交给探测循环接手（可能 launchd 那边已经在跑）
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
@@ -512,20 +597,23 @@ static BOOL DSHProbeKernel(NSString *host, NSInteger port) {
             self.kernelProbeTries = 0;
             self.statusLabel.text = [NSString stringWithFormat:
                 @"内核未响应，重新启动（第 %ld 次）…", (long)self.kernelStartAttempts];
-            NSLog(@"[dsh] 探测超时，重新 spawn（第 %ld 次）", (long)self.kernelStartAttempts);
+            DSHAppLog(@"探测超时，重新 spawn（第 %ld 次）", (long)self.kernelStartAttempts);
             [self ensureKernelRunning];
             return;
         }
 
         [self.spinner stopAnimating];
+        // 提示必须假设「用户手上没有终端」——
+        // 能点的是菜单里的按钮，不是命令行。
         self.statusLabel.text =
             @"dsh 内核未启动。\n\n"
-             "排查步骤：\n"
-             "1. 终端运行 dsh-doctor 看自检\n"
-             "2. 看日志：\n"
-             "   /var/mobile/Media/deepseek-harness/logs/web.log\n"
-             "   /var/mobile/Media/deepseek-harness/logs/app-spawn.log\n"
-             "3. 手动启动：dsh web --no-open --port 3080";
+             "可以先试：右上角菜单 → 内核 → 清除进程，然后点重试。\n\n"
+             "日志（用「文件」App 可直接打开）：\n"
+             "  /var/mobile/Media/deepseek-harness/logs/\n"
+             "    app.log        外壳自己的启动记录\n"
+             "    web.log        内核输出（带访问 URL）\n"
+             "    app-spawn.log  内核由 App 拉起时的输出\n"
+             "    ctl.log        dsh-ctl 操作记录";
         self.reloadButton.hidden = NO;
         return;
     }
@@ -655,7 +743,7 @@ static BOOL DSHProbeKernel(NSString *host, NSInteger port) {
 
     if (isAuthFailure && self.authRetryCount < 2) {
         self.authRetryCount += 1;
-        NSLog(@"[dsh] 认证失败，重新抓 token 重试（第 %ld 次）", (long)self.authRetryCount);
+        DSHAppLog(@"认证失败，重新抓 token 重试（第 %ld 次）", (long)self.authRetryCount);
         self.statusLabel.text = @"重新获取认证…";
         [self.spinner startAnimating];
         // 清掉 cookie，强制用新 token 重新握手
@@ -1164,10 +1252,15 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
         case DSHMenuActionAbout: {
             NSString *ver = [[NSBundle mainBundle]
                              objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?";
+            // 内核版本从安装戳里读，不写死 —— 写死的话升级后
+            // 「关于」页显示的还是老版本，反而误导排查。
+            NSString *kernelVer = [self installedKernelVersion] ?: @"?";
+            NSString *nodeVer = [self nodeVersionString] ?: @"?";
             UIAlertController *a = [UIAlertController
                 alertControllerWithTitle:@"DeepSeek Harness"
                                  message:[NSString stringWithFormat:
-                                          @"外壳版本 %@\n内核 0.2.2-rc.5\nNode 24.19.0 (iOS arm64)", ver]
+                                          @"外壳版本 %@\n内核 %@\nNode %@ (iOS arm64)",
+                                          ver, kernelVer, nodeVer]
                           preferredStyle:UIAlertControllerStyleAlert];
             [a addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleCancel handler:nil]];
             [self presentViewController:a animated:YES completion:nil];
@@ -1182,6 +1275,42 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
 - (BOOL)keepAliveEnabled {
     return ![[NSFileManager defaultManager]
              fileExistsAtPath:@"/var/mobile/Media/deepseek-harness/config/keepalive.disabled"];
+}
+
+/// 已安装的内核版本。
+/// 优先读 postinst 写的 installed.version（不受内核是否在跑影响），
+/// 退回读 VERSION（deb 自带）。都没有就返回 nil。
+- (nullable NSString *)installedKernelVersion {
+    NSArray<NSString *> *candidates = @[
+        @"/var/mobile/Media/deepseek-harness/config/installed.version",
+        @"/var/jb/usr/lib/dsh/VERSION",
+    ];
+    for (NSString *path in candidates) {
+        NSString *s = [NSString stringWithContentsOfFile:path
+                                                encoding:NSUTF8StringEncoding
+                                                   error:NULL];
+        s = [s stringByTrimmingCharactersInSet:
+                 [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (s.length > 0) return s;
+    }
+    return nil;
+}
+
+/// Node 版本。直接问 node 自己，避免和实际运行时漂移。
+- (nullable NSString *)nodeVersionString {
+    static NSString *cached = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSString *out = [DSHShell run:@"/var/jb/usr/lib/dsh/bin/node"
+                                  args:@[@"--version"]
+                               timeout:5];
+        out = [out stringByTrimmingCharactersInSet:
+                   [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        // node --version 输出带 v 前缀，去掉更自然
+        if ([out hasPrefix:@"v"]) out = [out substringFromIndex:1];
+        if (out.length > 0) cached = [out copy];
+    });
+    return cached;
 }
 
 /// 重建导航栏菜单，反映最新状态
@@ -1241,7 +1370,9 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
             completion:^(NSString *output, int status) {
         __strong typeof(weakSelf) self = weakSelf;
         if (!self) return;
-        NSLog(@"[dsh-ctl %@] status=%d %@", subcommand, status, output);
+        DSHAppLog(@"dsh-ctl %@ → status=%d %@", subcommand, status,
+                  [output stringByTrimmingCharactersInSet:
+                   [NSCharacterSet whitespaceAndNewlineCharacterSet]]);
         [self toast:output.length > 0 ? output : [NSString stringWithFormat:@"dsh-ctl %@ 完成", subcommand]];
         // 状态可能变了，等内核起稳再刷新
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)),
@@ -1284,8 +1415,14 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     }]];
     [a addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
 
-    a.popoverPresentationController.sourceView = self.clearProcessButton;
-    a.popoverPresentationController.sourceRect = self.clearProcessButton.bounds;
+    // iPad popover 必须有锚点。按钮在覆盖层里时才用它，
+    // 从菜单进来（按钮不可见）就退回到导航栏按钮。
+    if (self.clearProcessButton.window) {
+        a.popoverPresentationController.sourceView = self.clearProcessButton;
+        a.popoverPresentationController.sourceRect = self.clearProcessButton.bounds;
+    } else {
+        a.popoverPresentationController.barButtonItem = self.navigationItem.rightBarButtonItem;
+    }
     [self presentViewController:a animated:YES completion:nil];
 }
 

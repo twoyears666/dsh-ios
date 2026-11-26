@@ -25,6 +25,15 @@ FLAG="$ROOT/config/keepalive.disabled"
 PIDFILE="$ROOT/config/kernel.pid"
 LOG="$ROOT/logs/ctl.log"
 
+# 只认「我们这个移植版」的内核 argv，不碰设备上别的 dsh。
+# 设备上可能同时装着 npm 全局的 dsh、别的越狱包带的 dsh，
+# 用 'dsh/lib/bin.js' 这种宽模式会把它们一起杀掉。
+# 我们的内核 argv 一定含下面这个绝对路径：
+#   launcher 里 BIN=$D/node_modules/@deepseek-ai/dsh/lib/bin.js
+#   $D 固定 /var/jb/usr/lib/dsh（即便经 preboot 路径调用也不变）
+KERNEL_ARGV="$D/node_modules/@deepseek-ai/dsh/lib/bin.js"
+LAUNCHER_ARGV="$JB/usr/bin/dsh web"
+
 mkdir -p "$(dirname "$FLAG")" "$ROOT/logs" 2>/dev/null || true
 
 say() { printf '%s\n' "$*"; }
@@ -79,6 +88,14 @@ cmd_status() {
     fi
     if [ -f "$ROOT/logs/web.log" ]; then
         say "  日志:    $(date -r "$ROOT/logs/web.log" '+%Y-%m-%d %H:%M' 2>/dev/null || echo '?')"
+    fi
+
+    # App 自己的启动记录。外壳每次启动都会写一行
+    #   === App 启动 外壳 X 内核 Y ===
+    # 「版本」和这行里的内核号对不上，就是外壳和 deb 不同步。
+    if [ -f "$ROOT/logs/app.log" ]; then
+        _a=$(grep -o 'App 启动.*' "$ROOT/logs/app.log" 2>/dev/null | tail -1)
+        [ -n "$_a" ] && say "  外壳:    $_a"
     fi
     return 0
 }
@@ -146,7 +163,8 @@ cmd_stop() {
     return 0
 }
 
-# 杀干净所有 dsh 内核进程（不管是谁起的、路径长什么样）
+# 杀干净「本移植版」的内核进程（不管是谁起的：launchd 还是 App posix_spawn）
+# 不碰设备上别的 dsh 安装。
 # dsh-ctl 只能用 date / nc / pkill / sed，不要引入 fuser / lsof / pgrep。
 kill_kernels() {
     # 1) 优先用 pidfile（launcher 写入，最准）
@@ -158,13 +176,14 @@ kill_kernels() {
         esac
     fi
 
-    # 2) 按 argv 子串扫。'dsh/lib/bin.js' 能同时命中：
-    #    /var/jb/usr/lib/dsh/node_modules/@deepseek-ai/dsh/lib/bin.js
-    #    /private/preboot/<uuid>/.../dsh/lib/bin.js
-    pkill -f 'dsh/lib/bin.js' 2>/dev/null || true
+    # 2) 按 argv 扫本移植版的内核。
+    #    用完整安装路径做模式，而不是 'dsh/lib/bin.js'：
+    #    后者会命中设备上任何 dsh（npm 全局装的、别的越狱包），
+    #    我们要停的只是自己这一份。
+    pkill -f "$KERNEL_ARGV" 2>/dev/null || true
 
     # 3) 连 launcher 外壳一起收掉，避免它把子进程重新拉起
-    pkill -f "$JB/usr/bin/dsh web" 2>/dev/null || true
+    pkill -f "$LAUNCHER_ARGV" 2>/dev/null || true
 
     rm -f "$PIDFILE" 2>/dev/null || true
 }
@@ -175,8 +194,8 @@ wait_port_free() {
     while [ "$_i" -lt 3 ]; do
         is_running || return 0
         # 还没退：升级到 SIGKILL 再扫一遍
-        pkill -9 -f 'dsh/lib/bin.js' 2>/dev/null || true
-        pkill -9 -f "$JB/usr/bin/dsh web" 2>/dev/null || true
+        pkill -9 -f "$KERNEL_ARGV" 2>/dev/null || true
+        pkill -9 -f "$LAUNCHER_ARGV" 2>/dev/null || true
         sleep 1
         _i=$((_i + 1))
     done

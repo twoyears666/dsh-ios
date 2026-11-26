@@ -90,6 +90,19 @@ file "$APP/DSH"
 # ---------------------------------------------------------------- Info.plist
 log "写入 Info.plist"
 cp "$SRC/Info.plist" "$APP/Info.plist"
+
+# 版本号从环境变量注入，让「关于」页显示真实构建版本，
+# 而不是写死的 0.2.2。CFBundleVersion 必须是纯数字点分（App Store 规则），
+# 所以 build number 单独用 DSH_BUILD 传。
+if [ -n "${DSH_PKGVER:-}" ]; then
+    # 形如 0.2.2-rc.5+ios1.g1a2b3c4.57 -> 短版本取 + 之前的部分
+    SHORT="${DSH_PKGVER%%+*}"
+    plutil -replace CFBundleShortVersionString -string "$SHORT" "$APP/Info.plist"
+    log "  版本: $SHORT (包版本 $DSH_PKGVER)"
+fi
+if [ -n "${DSH_BUILD:-}" ]; then
+    plutil -replace CFBundleVersion -string "$DSH_BUILD" "$APP/Info.plist"
+fi
 plutil -lint "$APP/Info.plist" >/dev/null || die "Info.plist 格式错误"
 
 # ---------------------------------------------------------------- 图标

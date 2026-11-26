@@ -6,16 +6,20 @@
 # 内核已经 POSIX_SPAWN_SETSID 脱离了进程组，不归 launchd 管，
 # 光 bootout 会让它一直占着 3080 端口活到下次重启。
 JB=/var/jb
+D="$JB/usr/lib/dsh"
 ROOT=/var/mobile/Media/deepseek-harness
 PLIST="$JB/Library/LaunchDaemons/com.twoyears.dsh.plist"
 
 export PATH="$JB/usr/bin:$JB/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
+# 只扫我们自己这一份（完整路径做模式），
+# 不要用 'dsh/lib/bin.js' —— 那会连 npm 全局的 dsh 一起杀掉。
+KERNEL_ARGV="$D/node_modules/@deepseek-ai/dsh/lib/bin.js"
 if [ -x "$JB/usr/bin/dsh-ctl" ]; then
     "$JB/usr/bin/dsh-ctl" clear >/dev/null 2>&1 || true
 fi
 [ -f "$PLIST" ] && launchctl bootout system "$PLIST" 2>/dev/null || true
-pkill -f 'dsh/lib/bin.js' 2>/dev/null || true
+pkill -f "$KERNEL_ARGV" 2>/dev/null || true
 pkill -f "$JB/usr/bin/dsh web" 2>/dev/null || true
 rm -f "$ROOT/config/kernel.pid" 2>/dev/null || true
 
