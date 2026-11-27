@@ -226,6 +226,32 @@ App 只用两种**不需要 exec** 的手段控制它：
 「运行自检」也不再调 `dsh-doctor`（exec 不了），改成原生自检：
 越狱环境 + 版本 + pidfile + `sysctl` 进程列表。
 
+### 打包前本地验证：`verify-payload.sh`
+
+```sh
+sh build/scripts/verify-payload.sh
+```
+
+CI 里也跑（`build-cli` 的第一步，几秒出结果）。它检查的是**两次真机事故的
+模式**，不是风格问题：
+
+| 红线 | 来自哪次事故 |
+|---|---|
+| 维护者脚本不许有 `set -e` | 诊断命令失败 → postinst 非 0 退出 → dpkg 半配置 → Sileo 打不开 |
+| 不许 `kill "$变量"`（裸 PID） | pidfile 过期 + PID 回收 → root kill 可能命中 SpringBoard → 重启 |
+| 不许 `pkill -9` | 不给进程清理机会 |
+| 不许 `nohup` | 安装中拉起 300MB node，与 uicache 的 respring 叠加 |
+| 必须以 `exit 0` 结束 | 同上，别让安装因为非关键步骤失败 |
+| shebang 必须是 `#!/bin/sh` | iOS 上可能找不到解释器 |
+| plist 的启动目标必须存在且可执行 | 否则 launchd 静默不启动 |
+| `var/jb/usr/bin/*` 必须有执行位 | 否则装上去 EACCES |
+
+另外还有两类提示（不阻塞）：维护者脚本里可能失败又没兜底的命令、
+`control` 文件里出现 Debian 不支持的 `#` 注释。
+
+**这个脚本本身也验证过**：往 payload 里注入 `set -e`、裸 PID `kill`、
+`pkill -9`、`nohup`，五种违规全部被拦下，退出码 1。
+
 ### 别用 `launchctl disable`
 
 `dsh-ctl stop` / `disable` 以前会调 `launchctl disable system/com.twoyears.dsh`，

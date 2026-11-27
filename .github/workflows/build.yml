@@ -112,6 +112,11 @@ jobs:
         with:
           node-version: '24'
 
+      # 放在最前面：几秒就能跑完，红线问题不用等几分钟的依赖安装。
+      # 这些红线是两次真机事故的产物（dpkg 被弄坏、装包时设备重启）。
+      - name: 校验 payload 红线
+        run: sh build/scripts/verify-payload.sh
+
       - name: 下载 node iOS 运行时
         run: |
           mkdir -p build/work/dl
