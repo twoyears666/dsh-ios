@@ -135,6 +135,19 @@ static BOOL DSHProbeKernel(NSString *host, NSInteger port) {
 /// pidfile 里有活着的 pid 就说明「有人正在启动」，我们只等不抢。
 static BOOL DSHKernelStarting(void) {
     NSString *path = @"/var/mobile/Media/deepseek-harness/config/kernel.pid";
+
+    // pidfile 太旧 → 那是个卡死的实例，不能再挡住新内核。
+    // 真机上 single 档就卡过：进程活着、端口永远不起、
+    // 连 SIGKILL 都杀不掉（进程处于不可中断状态）。
+    NSDictionary *attrs = [[NSFileManager defaultManager]
+                           attributesOfItemAtPath:path error:NULL];
+    NSDate *mtime = attrs[NSFileModificationDate];
+    if (mtime != nil && -[mtime timeIntervalSinceNow] > 120) {
+        NSLog(@"[dsh] pidfile 已过期（%ld 秒前），视为卡死实例",
+              (long)-[mtime timeIntervalSinceNow]);
+        return NO;
+    }
+
     NSString *raw = [NSString stringWithContentsOfFile:path
                                               encoding:NSUTF8StringEncoding
                                                  error:NULL];
@@ -246,6 +259,8 @@ static void DSHAppLog(NSString *fmt, ...) {
 /// 探测超时后的自动重试会调 ensureKernelRunning，那里会写 kernel.want，
 /// 等于把用户刚清掉的进程又拉起来 —— 必须挡住。
 @property (nonatomic, assign) BOOL suppressAutoStart;
+/// 已经因为「档位起不来」自动降级过一次了，避免无限循环
+@property (nonatomic, assign) BOOL autoTierFallbackTried;
 
 @property (nonatomic, assign) BOOL kernelReady;
 @property (nonatomic, assign) NSInteger kernelProbeTries;
@@ -979,6 +994,33 @@ static NSString *const kDSHDataRoot = @"/var/mobile/Media/deepseek-harness";
     // 探测窗口：nowasm 档在 iOS 上冷启动 60-90 秒是常态，
     // 原来 26 次 × 1.5s ≈ 39 秒太短，内核还没监听就放弃了。
     if (self.kernelProbeTries > 60) {
+        // 走到这里说明内核在 90 秒窗口里一直没监听。
+        // 先把可能卡死的实例强杀掉 —— 否则它会一直占着 pidfile，
+        // 让后面所有「重新拉起」都被挡住（真机上就这么卡了两分钟）。
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            int killed = [DSHProc killAllKernelsWait:3];
+            DSHAppLog(@"放弃前清理卡死实例：%d 个", killed);
+        });
+
+        // 自动降档：非 nowasm 档可能直接卡死或 SIGBUS，
+        // 给它一次退回最保守档的机会，免得用户卡在「永远起不来」。
+        NSString *curTier = [self effectiveTierName] ?: @"nowasm";
+        if (![curTier isEqualToString:@"nowasm"] && !self.autoTierFallbackTried) {
+            self.autoTierFallbackTried = YES;
+            DSHAppLog(@"档位 %@ 起不来，自动降级到 nowasm 重试", curTier);
+            [self applyTier:@"nowasm"];
+            self.kernelProbeTries = 0;
+            self.kernelStartAttempts = 0;
+            self.statusLabel.text = [NSString stringWithFormat:
+                @"档位 %@ 起不来，已自动切回 nowasm 重试…", curTier];
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                [self ensureKernelRunning];
+                [self probeKernelOnce];
+            });
+            return;
+        }
+
         // 第一轮 39 秒失败后，再尝试启动一次内核（spawn 可能失败过）
         if (self.kernelStartAttempts < 2) {
             self.kernelStartAttempts += 1;
