@@ -387,6 +387,9 @@ static void DSHAppLog(NSString *fmt, ...) {
         __strong typeof(weakSelf) self = weakSelf;
         if (!self) return;
         DSHAppLog(@"回前台：检查内核");
+        // 用户主动回到 App，就是要用 —— 之前「清除进程」设的抑制要解除，
+        // 否则内核永远起不来（真机上就卡在这里）。
+        self.suppressAutoStart = NO;
         [self ensureKernelRunning];
         [self probeKernelOnce];
     }];

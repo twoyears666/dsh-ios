@@ -186,6 +186,8 @@ mkdir -p "$ROOT/logs" 2>/dev/null || true
     else
         echo "没有残留 plist"
     fi
+    # 保活恢复成默认开启（真机上这个标记会让 App 退后台时停掉内核）
+    rm -f "$ROOT/config/keepalive.disabled" 2>/dev/null || true
     echo "--- 端口 3080 ---"
     if nc -z 127.0.0.1 3080 2>/dev/null; then echo "在监听（可能是旧内核）"; else echo "未监听"; fi
     echo
