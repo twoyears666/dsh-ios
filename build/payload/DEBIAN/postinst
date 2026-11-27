@@ -1,6 +1,18 @@
 #!/bin/sh
 # postinst —— 安装后配置 + 数据迁移
-set -e
+#
+# 这里**故意不用 set -e**。
+#
+# 真机事故：.44 的 postinst 里加了诊断代码，其中 `tail supervise.log`
+# （文件不存在）和 `grep` （没匹配）返回非 0，set -e 让整个脚本以失败退出，
+# dpkg 于是把包标成「半配置」，之后 Sileo 调 dpkg 全部失败 ——
+# 用户连包管理器都打不开了。
+#
+# 本脚本里每一步都是 best-effort：建目录、迁数据、签 App、注册 launchd。
+# 没有哪一步「失败就必须让安装失败」——装完内核没起来，用户可以打开 App
+# 看日志；但 dpkg 数据库坏了，用户什么都做不了。
+# 所以改成：不中断，失败的地方自己打日志，最后统一 exit 0。
+set -u
 
 JB=/var/jb
 D="$JB/usr/lib/dsh"
@@ -150,21 +162,31 @@ INSTALL_LOG="$ROOT/logs/install.log"
 mkdir -p "$ROOT/logs" 2>/dev/null || true
 
 install_diag() {
+    # 注意：postinst 顶部是 set -e，而这里每一条都是「可能失败」的诊断命令
+    # （文件不存在、grep 没匹配、launchctl 报错都很正常）。
+    # 任何一条返回非 0 都会让整个 postinst 失败 → dpkg 留下半配置状态 →
+    # Sileo 再也调不动 dpkg。真机上就是这么把 dpkg 弄坏的。
+    # 所以这里**每一条都 || true**，并且整体再兜一层。
     {
         echo "=== $(date '+%Y-%m-%d %H:%M:%S') $1 ==="
         echo "--- plist ---"
-        ls -l "$PLIST" 2>&1
-        plutil -lint "$PLIST" 2>&1
+        ls -l "$PLIST" 2>&1 || true
+        plutil -lint "$PLIST" 2>&1 || true
         echo "--- launchctl print system/$LABEL ---"
-        launchctl print "system/$LABEL" 2>&1 | head -25
+        launchctl print "system/$LABEL" 2>&1 | head -25 || true
         echo "--- disabled 覆盖 ---"
-        launchctl print-disabled system 2>&1 | grep -i "$LABEL" 2>&1
+        launchctl print-disabled system 2>&1 | grep -i "$LABEL" 2>&1 || echo "(未在禁用表中)"
         echo "--- 端口 3080 ---"
         if nc -z 127.0.0.1 3080 2>/dev/null; then echo "在监听"; else echo "未监听"; fi
         echo "--- supervise.log 尾部 ---"
-        tail -15 "$ROOT/logs/supervise.log" 2>&1
+        if [ -f "$ROOT/logs/supervise.log" ]; then
+            tail -15 "$ROOT/logs/supervise.log" 2>&1 || true
+        else
+            echo "(不存在)"
+        fi
         echo
-    } >>"$INSTALL_LOG" 2>&1
+    } >>"$INSTALL_LOG" 2>&1 || true
+    return 0
 }
 
 if [ -f "$PLIST" ]; then
