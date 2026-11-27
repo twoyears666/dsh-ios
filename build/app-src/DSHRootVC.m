@@ -272,6 +272,7 @@ static void DSHAppLog(NSString *fmt, ...) {
 - (BOOL)keepAliveEnabled;
 - (void)ensureKernelRunning;
 - (void)probeKernelOnce;
+- (void)probeExecutables;
 - (void)handleProbeResult:(BOOL)up;
 - (void)loadWithToken:(nullable NSString *)token;
 - (nullable NSString *)scrapeTokenFromLog;
@@ -336,6 +337,7 @@ static void DSHAppLog(NSString *fmt, ...) {
 
     [self buildLayout];
     [self observeBridgeReplies];
+    [self probeExecutables];
     [self startKernelWatch];
 }
 
@@ -540,6 +542,41 @@ static void DSHAppLog(NSString *fmt, ...) {
         [fm createFileAtPath:wantPath contents:[NSData data] attributes:nil];
         DSHAppLog(@"写入 kernel.want，等监督进程拉起内核");
     }
+}
+
+/// 探测 App 到底能不能 exec。
+///
+/// 一直没搞清楚的事：access("/var/jb/usr/bin/dsh", X_OK) 成功，
+/// 但 posix_spawn 一律 ENOENT。可能性有两种：
+///   · 沙盒禁止 exec（连 /bin/sh 也不行）
+///   · 只是脚本的解释器 / 目标二进制被 AMFI 拒了
+/// 三种目标各试一次，把结果写进 app.log，就能分清。
+///
+/// 这决定了内核能不能由 App 拉起（launchd 那条路如果走不通，
+/// 这是唯一的备选）。
+- (void)probeExecutables {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSArray<NSArray *> *cases = @[
+            @[ @"/var/jb/usr/lib/dsh/bin/node", @[ @"--version" ] ],   // 真二进制，无 shebang
+            @[ @"/bin/sh", @[ @"-c", @"echo ok" ] ],                    // 系统 sh
+            @[ @"/var/jb/usr/bin/dsh", @[ @"--version" ] ],             // 脚本（#!/bin/sh）
+        ];
+        for (NSArray *c in cases) {
+            NSString *path = c[0];
+            NSArray *args = c[1];
+            dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+            [DSHShell runAsync:path args:args timeout:6 completion:^(NSString *out, int status) {
+                NSString *trimmed = [out stringByTrimmingCharactersInSet:
+                                     [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                if (trimmed.length > 120) trimmed = [trimmed substringToIndex:120];
+                DSHAppLog(@"exec 探测 %@ → status=%d %@", path, status, trimmed);
+                dispatch_semaphore_signal(sem);
+            }];
+            dispatch_semaphore_wait(sem,
+                dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8 * NSEC_PER_SEC)));
+        }
+        DSHAppLog(@"exec 探测结束");
+    });
 }
 
 - (void)probeKernelOnce {
