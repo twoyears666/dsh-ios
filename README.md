@@ -318,6 +318,36 @@ sh build/scripts/smoke-maintainer.sh
 `verify-payload.sh` 误判，所以它声明了 `verify-allow-patterns` 豁免标记；
 豁免只跳过模式匹配类检查，`set -e` / `exit 0` / shebang 照样查。
 
+### launchd 要用 `/bin/sh` 跑脚本
+
+真机 `install.log` 抓到的状态：
+
+```
+user/501/com.twoyears.dsh = {
+    type = LaunchDaemon
+    state = spawn scheduled
+    active count = 0
+    program = /var/jb/usr/bin/dsh-supervise
+}
+```
+
+`active count = 0` + `spawn scheduled`，而 `supervise.log` 压根不存在 ——
+**脚本一次都没被执行**。把脚本路径直接写进 `ProgramArguments` 时，
+launchd 不接受这种「程序是个脚本」的注册。
+
+改成：
+
+```xml
+<key>ProgramArguments</key>
+<array>
+    <string>/bin/sh</string>
+    <string>/var/jb/usr/bin/dsh-supervise</string>
+</array>
+```
+
+`/bin/sh` 是系统自带、launchd 一定能 exec，脚本作为参数传进去。
+`verify-payload.sh` 的 plist 检查也相应支持「解释器 + 脚本」两段式。
+
 ### 别用 `launchctl disable`
 
 `dsh-ctl stop` / `disable` 以前会调 `launchctl disable system/com.twoyears.dsh`，

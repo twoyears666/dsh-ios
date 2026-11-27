@@ -12,6 +12,14 @@
     -->
     <key>ProgramArguments</key>
     <array>
+        <!--
+          不要直接写脚本路径。真机上 launchd 把它注册成 user/501 的
+          LaunchDaemon 后 state 一直停在 "spawn scheduled"、active count = 0，
+          脚本一次都没被执行（supervise.log 压根不存在）。
+          改成「用 /bin/sh 跑脚本」：/bin/sh 是系统自带、launchd 一定能 exec，
+          脚本作为参数传进去。这是 launchd 跑脚本的标准做法。
+        -->
+        <string>/bin/sh</string>
         <string>/var/jb/usr/bin/dsh-supervise</string>
     </array>
     <key>RunAtLoad</key>

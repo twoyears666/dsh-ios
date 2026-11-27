@@ -289,6 +289,8 @@ else
             grep -q "<key>$key</key>" "$p" || fail "$name: 缺 $key"
         done
         # ProgramArguments 第一个元素必须是 payload 里真实存在的可执行文件
+        # ProgramArguments 可能是「解释器 + 脚本」两段式（/bin/sh script）。
+        # 解释器是系统路径，不用查 payload；脚本必须存在且可执行。
         prog=$(sed -n '/<key>ProgramArguments<\/key>/,/<\/array>/p' "$p" \
                | sed -n 's|.*<string>\(/var/jb/[^<]*\)</string>.*|\1|p' | head -1)
         if [ -n "$prog" ]; then
@@ -302,6 +304,19 @@ else
             else
                 fail "$name: 启动目标不在 payload 里（$rel）"
             fi
+        else
+            # 没有 /var/jb 开头的参数 —— 说明用的是纯系统程序，
+            # 那至少要能看出它是不是解释器 + 脚本的写法
+            first=$(sed -n '/<key>ProgramArguments<\/key>/,/<\/array>/p' "$p" \
+                    | sed -n 's|.*<string>\([^<]*\)</string>.*|\1|p' | head -1)
+            case "$first" in
+                /bin/sh|/bin/bash|/usr/bin/*)
+                    fail "$name: 用了解释器 $first，但没找到要执行的脚本参数" ;;
+                '')
+                    fail "$name: ProgramArguments 解析不出内容" ;;
+                *)
+                    warn "$name: 启动目标是系统路径 $first，跳过 payload 检查" ;;
+            esac
         fi
     done
 fi
