@@ -140,12 +140,57 @@ if [ -f "$D/VERSION" ]; then
 fi
 
 # 5.3 重新注册（clear 会把 launchd 置为 disabled，这里恢复默认自启）
+#
+# 真机上出现过「装完内核不跑、supervise.log 压根不存在」的情况：
+# launchd 根本没接住这个 job，而失败被 || true 吞掉了，什么都没留下。
+# 所以这里改成：注册 → 打印诊断 → 没起来就自己兜底拉起，全程写 install.log。
+INSTALL_LOG="$ROOT/logs/install.log"
+mkdir -p "$ROOT/logs" 2>/dev/null || true
+
+install_diag() {
+    {
+        echo "=== $(date '+%Y-%m-%d %H:%M:%S') $1 ==="
+        echo "--- plist ---"
+        ls -l "$PLIST" 2>&1
+        plutil -lint "$PLIST" 2>&1
+        echo "--- launchctl print system/$LABEL ---"
+        launchctl print "system/$LABEL" 2>&1 | head -25
+        echo "--- disabled 覆盖 ---"
+        launchctl print-disabled system 2>&1 | grep -i "$LABEL" 2>&1
+        echo "--- 端口 3080 ---"
+        if nc -z 127.0.0.1 3080 2>/dev/null; then echo "在监听"; else echo "未监听"; fi
+        echo "--- supervise.log 尾部 ---"
+        tail -15 "$ROOT/logs/supervise.log" 2>&1
+        echo
+    } >>"$INSTALL_LOG" 2>&1
+}
+
 if [ -f "$PLIST" ]; then
-    launchctl enable "system/com.twoyears.dsh" 2>/dev/null || true
+    launchctl enable "system/$LABEL" 2>/dev/null || true
     rm -f "$ROOT/config/keepalive.disabled" 2>/dev/null || true
+    # 清掉「我要内核跑」以外的历史状态；want 由 App 自己写
+    launchctl bootout "system/$LABEL" 2>/dev/null || true
     launchctl bootout system "$PLIST" 2>/dev/null || true
-    launchctl bootstrap system "$PLIST" 2>/dev/null \
-        || launchctl load -w "$PLIST" 2>/dev/null || true
+    sleep 1
+
+    # 依次尝试三种注册方式，哪种成就停
+    launchctl bootstrap system "$PLIST" 2>>"$INSTALL_LOG" \
+        || launchctl load -w "$PLIST" 2>>"$INSTALL_LOG" \
+        || launchctl kickstart "system/$LABEL" 2>>"$INSTALL_LOG" \
+        || true
+    sleep 3
+
+    install_diag "注册完成"
+
+    # 兜底：launchd 没接住就自己拉起来。虽然是 root 起的一次性进程，
+    # 但至少内核能用；下次重启再由 launchd 接管。
+    if ! nc -z 127.0.0.1 3080 2>/dev/null; then
+        echo "$(date '+%Y-%m-%d %H:%M:%S') launchd 未拉起内核，postinst 直接启动监督进程" \
+            >>"$INSTALL_LOG"
+        (nohup "$JB/usr/bin/dsh-supervise" >>"$ROOT/logs/supervise.log" 2>&1 &) 2>/dev/null || true
+        sleep 4
+        install_diag "兜底启动后"
+    fi
 fi
 
 # ---------------------------------------------------------------- 6. 提示

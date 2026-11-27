@@ -226,6 +226,21 @@ App 只用两种**不需要 exec** 的手段控制它：
 「运行自检」也不再调 `dsh-doctor`（exec 不了），改成原生自检：
 越狱环境 + 版本 + pidfile + `sysctl` 进程列表。
 
+### 别用 `launchctl disable`
+
+`dsh-ctl stop` / `disable` 以前会调 `launchctl disable system/com.twoyears.dsh`，
+作用是「别让 launchd 再拉起它」。但这会往 launchd 的 **disabled 覆盖表**里写一条记录，
+之后 `launchctl bootstrap` 会被直接拒绝 —— 而且失败被 `|| true` 吞掉，日志里什么都看不到。
+
+真机上的表现就是：装完新版本，内核不跑、`supervise.log` 压根不存在、
+`pidfile (无)`，但 deb 明明装上了。
+
+现在：
+- `stop` / `disable` 完全不碰 launchd，只写标记文件 + 杀进程
+- 「该不该跑」由 `dsh-supervise` 读标记判断，不需要卸载 job
+- `postinst` 注册后会打印 `launchctl print` / `print-disabled` / 端口状态到
+  `logs/install.log`，并且**如果 launchd 没接住就直接把监督进程拉起来兜底**
+
 ### 回环免 token
 
 内核原本对**所有**请求都要 token：访问 `/` 不带 token 直接 401。

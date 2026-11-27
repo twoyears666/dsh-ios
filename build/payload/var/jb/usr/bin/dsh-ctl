@@ -195,32 +195,27 @@ cmd_start() {
 
 cmd_stop() {
     logline "stop"
-    # 清掉「我要内核跑」，否则 dsh-supervise 会马上又把它拉起来
+
+    # 停内核 = 两件事：删掉「我要它跑」的意愿 + 杀掉进程。
+    #
+    # 这里**故意不碰 launchd**：
+    #   - launchctl disable 会把 job 写进 launchd 的 disabled 覆盖表，
+    #     之后 bootstrap 会被直接拒绝。真机上就是这么丢的：
+    #     升级时 prerm/postinst 都跑 clear，disable 之后再也起不来，
+    #     而且失败被 || true 吞掉，日志里什么都看不到。
+    #   - bootout 会把监督进程一起收掉，那样「启动内核」就没人执行了。
+    #
+    # 监督进程本来就靠标记文件判断该不该跑，不需要卸载它。
     rm -f "$WANT" 2>/dev/null || true
-    # 先关保活，否则 launchd 会立刻拉起
     if [ ! -f "$FLAG" ]; then
         mkdir -p "$(dirname "$FLAG")"
         : >"$FLAG"
         say "已关闭保活"
     fi
-    launchctl disable "system/$LABEL" 2>/dev/null || true
 
-    if launchd_loaded; then
-        launchctl bootout "system/$LABEL" 2>/dev/null || \
-            launchctl unload "$PLIST" 2>/dev/null || true
-        say "已停止（launchd 已卸载）"
-    fi
-
-    # 兜底：杀掉残留进程
-    #
-    # 这里不能用 "$D/node_modules/..." 这种绝对路径做模式 ——
-    # 内核可能是 App 用 posix_spawn 起的，也可能是 /var/jb/usr/bin/dsh
-    # 经 preboot 符号链接解析后执行的，argv 里的路径和 $D 不一致，
-    # 旧模式匹配不到，于是「停不掉」。改用与路径无关的子串。
     kill_kernels
-
     wait_port_free || return 1
-    say "内核已停止"
+    say "内核已停止（dsh-ctl start 可恢复）"
     return 0
 }
 
@@ -318,8 +313,9 @@ cmd_disable() {
     logline "disable"
     mkdir -p "$(dirname "$FLAG")"
     : >"$FLAG"
-    launchctl disable "system/$LABEL" 2>/dev/null || true
-    say "保活已关闭：崩溃后不会自动拉起，但仍可手动 dsh-ctl start"
+    # 不调 launchctl disable：那会往 launchd 的 disabled 覆盖表里写记录，
+    # 之后 bootstrap 会被拒。保活语义现在由 FLAG 文件表达，监督进程自己读。
+    say "保活已关闭：开机不自启，但仍可手动 dsh-ctl start"
     say "（当前内核未停止；如需停止用 dsh-ctl stop）"
     return 0
 }
