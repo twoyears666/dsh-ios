@@ -573,7 +573,7 @@ static void DSHAppLog(NSString *fmt, ...) {
             self.kernelProbeTries = 0;
             self.statusLabel.text = [NSString stringWithFormat:
                 @"内核未响应，重新启动（第 %ld 次）…", (long)self.kernelStartAttempts];
-            DSHAppLog(@"探测超时，重新 spawn（第 %ld 次）", (long)self.kernelStartAttempts);
+            DSHAppLog(@"探测超时，重新请求启动（第 %ld 次）", (long)self.kernelStartAttempts);
             [self ensureKernelRunning];
             return;
         }

@@ -174,7 +174,10 @@ if [ -f "$PLIST" ]; then
     sleep 1
 
     # 依次尝试三种注册方式，哪种成就停
+    # -F 是关键：强制加载，忽略 launchd 的 disabled 覆盖表。
+    # 老版本留下的 disable 记录只能靠它绕过（bootstrap 会被直接拒）。
     launchctl bootstrap system "$PLIST" 2>>"$INSTALL_LOG" \
+        || launchctl load -w -F "$PLIST" 2>>"$INSTALL_LOG" \
         || launchctl load -w "$PLIST" 2>>"$INSTALL_LOG" \
         || launchctl kickstart "system/$LABEL" 2>>"$INSTALL_LOG" \
         || true
