@@ -366,12 +366,14 @@ jobs:
             || { echo "❌ payload 里缺 pi-ai/.manifest.json"; exit 1; }
           echo "✅ payload 里 pi-ai data/ 完整"
           echo "=== 必需文件 ==="
+          # node 现在在 App bundle 里（真机上只有 bundle 内的二进制能被执行）；
+          # launchd plist 已移除（内核由 App 拉起）
           for f in usr/bin/dsh usr/bin/dsh-doctor usr/bin/dsh-url \
-                   usr/lib/dsh/bin/node usr/lib/dsh/ios-image-shim.mjs \
+                   Applications/DSH.app/runtime/node usr/lib/dsh/ios-image-shim.mjs \
                    usr/lib/dsh/tier.sh usr/lib/dsh/smoke.js usr/lib/dsh/fetch-shim.cjs \
                    Applications/DSH.app/entitlements.plist \
                    usr/lib/dsh/node_modules/@deepseek-ai/dsh/lib/bin.js \
-                   etc/dsh/dsh.env Library/LaunchDaemons/com.twoyears.dsh.plist \
+                   etc/dsh/dsh.env \
                    Applications/DSH.app/DSH Applications/DSH.app/Info.plist; do
               if [ -e "$JB/$f" ]; then echo "  ✅ $f"; else echo "  ❌ $f"; exit 1; fi
           done
@@ -380,7 +382,8 @@ jobs:
           echo "  .node/.dylib: $N"
           test "$N" = "0" || exit 1
           echo "=== 可执行位 ==="
-          for f in usr/bin/dsh usr/bin/dsh-doctor usr/bin/dsh-url usr/lib/dsh/bin/node Applications/DSH.app/DSH; do
+          for f in usr/bin/dsh usr/bin/dsh-doctor usr/bin/dsh-url \
+                   Applications/DSH.app/runtime/node Applications/DSH.app/DSH; do
               test -x "$JB/$f" || { echo "  ❌ $f 不可执行"; exit 1; }
               echo "  ✅ $f"
           done

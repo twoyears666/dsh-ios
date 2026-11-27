@@ -21,22 +21,23 @@ REQUIRED_CONTROL = [
 ]
 
 # deb 内的路径都带 rootless 前缀 var/jb/
+# node 现在在 App bundle 里：真机上 App 只有 exec 被挡，而执行自己
+# bundle 内的二进制是允许的。launchd plist 已移除（内核由 App 拉起）。
 REQUIRED_FILES = [
     "var/jb/usr/bin/dsh",
     "var/jb/usr/bin/dsh-doctor",
     "var/jb/usr/bin/dsh-url",
-    "var/jb/usr/lib/dsh/bin/node",
+    "var/jb/Applications/DSH.app/runtime/node",
     "var/jb/usr/lib/dsh/ios-image-shim.mjs",
     "var/jb/usr/lib/dsh/node_modules/@deepseek-ai/dsh/lib/bin.js",
     "var/jb/etc/dsh/dsh.env",
-    "var/jb/Library/LaunchDaemons/com.twoyears.dsh.plist",
 ]
 
 EXECUTABLES = [
     "var/jb/usr/bin/dsh",
     "var/jb/usr/bin/dsh-doctor",
     "var/jb/usr/bin/dsh-url",
-    "var/jb/usr/lib/dsh/bin/node",
+    "var/jb/Applications/DSH.app/runtime/node",
 ]
 
 # GUI 相关（可选，缺了只警告）
