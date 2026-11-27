@@ -150,11 +150,29 @@ static NSString *const kKernelPidFile = @"/var/mobile/Media/deepseek-harness/con
 /// 拿不到可执行路径时一律返回 NO —— 宁可杀不掉，也不能误杀。
 + (BOOL)isKernelPid:(pid_t)pid {
     if (pid <= 0) return NO;
+    // 自己 spawn 过的，直接认（路径判定有时读不到 argv）
+    @synchronized (gSpawnedPids()) {
+        if ([gSpawnedPids() containsObject:@(pid)]) return YES;
+    }
     NSString *path = DSHExecutablePath(pid);
     if (path.length == 0) return NO;
     return [path containsString:@"/dsh/"]
         || [path containsString:@"dsh/bin/node"]
         || [path containsString:@"/var/jb/usr/bin/dsh"];
+}
+
+static NSMutableSet<NSNumber *> *gSpawnedPids(void) {
+    static NSMutableSet *set = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ set = [NSMutableSet set]; });
+    return set;
+}
+
++ (void)rememberSpawnedPid:(pid_t)pid {
+    if (pid <= 0) return;
+    @synchronized (gSpawnedPids()) {
+        [gSpawnedPids() addObject:@(pid)];
+    }
 }
 
 + (NSArray<NSNumber *> *)kernelPids {

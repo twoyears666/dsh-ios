@@ -805,6 +805,7 @@ static NSString *const kDSHDataRoot = @"/var/mobile/Media/deepseek-harness";
     NSString *p = [dir stringByAppendingPathComponent:@"kernel.pid"];
     [[NSString stringWithFormat:@"%d\n", pid] writeToFile:p atomically:NO
                                                  encoding:NSUTF8StringEncoding error:NULL];
+    [DSHProc rememberSpawnedPid:pid];
     DSHAppLog(@"  已写 pidfile: %d", pid);
 }
 
@@ -880,7 +881,18 @@ static NSString *const kDSHDataRoot = @"/var/mobile/Media/deepseek-harness";
     }
 
     self.kernelProbeTries += 1;
-    if (self.kernelProbeTries > 26) {
+
+    // 给用户一个「在动」的反馈：nowasm 档冷启动 60-90 秒，
+    // 一直停在「正在启动」会让人以为卡死。
+    {
+        NSInteger secs = (NSInteger)(self.kernelProbeTries * 1.5);
+        self.statusLabel.text = [NSString stringWithFormat:
+            @"正在启动 dsh 内核…（已等 %ld 秒）\n\n"
+             "iOS 上首次启动需要 60-90 秒，请稍候。", (long)secs];
+    }
+    // 探测窗口：nowasm 档在 iOS 上冷启动 60-90 秒是常态，
+    // 原来 26 次 × 1.5s ≈ 39 秒太短，内核还没监听就放弃了。
+    if (self.kernelProbeTries > 60) {
         // 第一轮 39 秒失败后，再尝试启动一次内核（spawn 可能失败过）
         if (self.kernelStartAttempts < 2) {
             self.kernelStartAttempts += 1;

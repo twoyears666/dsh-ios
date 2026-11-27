@@ -39,6 +39,11 @@ NS_ASSUME_NONNULL_BEGIN
 /// pidfile 可能过期，PID 回收后会指向别的进程 —— 杀之前必须过这一关。
 + (BOOL)isKernelPid:(pid_t)pid;
 
+/// 记住「这个 pid 是我们自己起的」。
+/// App 里 exec 出来的子进程，路径判定（KERN_PROCARGS2）有时拿不到，
+/// 但自己起的进程肯定是自己的内核 —— 记下来，停止时直接认。
++ (void)rememberSpawnedPid:(pid_t)pid;
+
 /// 找出所有「本移植版内核」进程的 pid（按可执行路径判定，不靠 pidfile）。
 /// 用于起新内核前清理占用 3080 的旧实例。
 + (NSArray<NSNumber *> *)kernelPids;
