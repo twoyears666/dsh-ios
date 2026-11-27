@@ -66,6 +66,7 @@ runProfile({ profile: "desktop", args: ["--no-open", "--host", "127.0.0.1", ...]
 | `shell.openExternal` | `UIApplication.openURL`（scheme 白名单） |
 | `app.getPath` | 路径映射（home/userData/temp/documents…） |
 | `window.close` | 降级为日志（iOS 无窗口概念） |
+| 语音转文字（sherpa-onnx） | `SFSpeechRecognizer`（见「语音输入」） |
 | 托盘 | ❌ iOS 无此概念 |
 | 自动更新 | ❌ 走 Sileo |
 
