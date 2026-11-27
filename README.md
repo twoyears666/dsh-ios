@@ -318,6 +318,45 @@ sh build/scripts/smoke-maintainer.sh
 `verify-payload.sh` 误判，所以它声明了 `verify-allow-patterns` 豁免标记；
 豁免只跳过模式匹配类检查，`set -e` / `exit 0` / shebang 照样查。
 
+### 内核由 App 直接拉起（不再依赖 launchd）
+
+真机 `install.log` 证明 launchd 这条路过不去：
+
+```
+user/501/com.twoyears.dsh = {
+    state = spawn scheduled
+    active count = 0
+    program = /bin/sh            ← 已经改成 /bin/sh + 脚本，注册成功
+}
+```
+
+`active count` 始终 0、`supervise.log` 从未生成 —— **launchd 从来没真正 spawn 过它**。
+改成 `/bin/sh` 包一层也没用。
+
+所以内核改由 App 自己起，**直接 `exec node`**，完全绕开 shell 脚本：
+
+```
+node <tier 参数> --import ios-image-shim.mjs --expose-internals \
+     <dsh>/lib/bin.js web --no-open --port 3080
+```
+
+App 侧复刻了 launcher 的全部行为：
+
+| launcher 做的事 | App 的做法 |
+|---|---|
+| V8 档位选择 | 读 `$DSH_HOME/.dsh-tier` 缓存；没有就用最保守的 `nowasm` |
+| 档位参数 | `tierArgsForName:`，与 `tier.sh` 的 `TIERS` 表一致 |
+| 环境变量 | `kernelEnvironment`，逐项复刻（含从 `dsh.env` 解析 `DSH_WEB_PORT` 等） |
+| 写 pidfile | `recordKernelPid:` |
+
+启动时依次尝试三种方式，每种都把 rc 记进 `app.log`：
+
+1. 直接 `exec node`
+2. `/bin/sh -c "exec node ..."`
+3. `/bin/sh <launcher> web ...`（原来的方式，兜底）
+
+launchd 的 plist 保留着（现在无害），`dsh-supervise` 也保留给终端用户用。
+
 ### launchd 要用 `/bin/sh` 跑脚本
 
 真机 `install.log` 抓到的状态：

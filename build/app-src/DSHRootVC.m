@@ -273,6 +273,11 @@ static void DSHAppLog(NSString *fmt, ...) {
 - (void)ensureKernelRunning;
 - (void)probeKernelOnce;
 - (void)probeExecutables;
+- (int)spawnKernelDirectly;
+- (nullable NSString *)cachedTierName;
+- (NSArray<NSString *> *)tierArgsForName:(NSString *)name;
+- (NSDictionary<NSString *, NSString *> *)kernelEnvironment;
+- (void)recordKernelPid:(pid_t)pid;
 - (void)handleProbeResult:(BOOL)up;
 - (void)loadWithToken:(nullable NSString *)token;
 - (nullable NSString *)scrapeTokenFromLog;
@@ -520,40 +525,211 @@ static void DSHAppLog(NSString *fmt, ...) {
 
 /// 确保 dsh 内核在跑：先探测，没跑就通过 launchctl 拉起。
 - (void)ensureKernelRunning {
-    // 真机日志已经证明：App 进程不允许 exec 任何外部程序 ——
-    // access("/var/jb/usr/bin/dsh", X_OK) 成功，posix_spawn 却一律 ENOENT
-    // （连 /bin/launchctl 都不可执行）。所以这里不再尝试自己起内核，
-    // 只负责「表达意愿」：写 config/kernel.want，
-    // 由 launchd 拉起的 dsh-supervise 去实际执行。
-    NSFileManager *fm = [NSFileManager defaultManager];
-    NSString *configDir = @"/var/mobile/Media/deepseek-harness/config";
-    NSString *wantPath = [configDir stringByAppendingPathComponent:@"kernel.want"];
-
+    // 内核改由 App 直接拉起。
+    //
+    // 为什么不再依赖 launchd：
+    //   真机 install.log 里 job 注册成功（program = /bin/sh、参数两段都对），
+    //   但 active count 一直是 0、state 停在 spawn scheduled、
+    //   supervise.log 压根不存在 —— launchd 从来没真正 spawn 过它。
+    //   改用 /bin/sh 包一层也没用，所以这条路放弃了。
+    //
+    // 也不再走 /var/jb/usr/bin/dsh 这个脚本：App exec 脚本会 ENOENT
+    // （解释器或沙盒问题）。这里直接 exec node，参数和环境由 App 自己拼，
+    // 完全复刻 launcher 的行为。
     if (self.suppressAutoStart) {
-        DSHAppLog(@"用户刚停止过内核，不自动写 kernel.want");
+        DSHAppLog(@"用户刚停止过内核，不自动拉起");
         return;
     }
     if (DSHKernelStarting()) {
-        DSHAppLog(@"内核进程已在运行（pidfile 有活进程），不重复请求");
+        DSHAppLog(@"内核进程已在运行（pidfile 有活进程），不重复拉起");
         return;
     }
-    [fm createDirectoryAtPath:configDir withIntermediateDirectories:YES attributes:nil error:NULL];
-    if (![fm fileExistsAtPath:wantPath]) {
-        [fm createFileAtPath:wantPath contents:[NSData data] attributes:nil];
-        DSHAppLog(@"写入 kernel.want，等监督进程拉起内核");
-    }
+
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        int rc = [weakSelf spawnKernelDirectly];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) self = weakSelf;
+            if (!self) return;
+            DSHAppLog(@"spawnKernelDirectly rc=%d", rc);
+            if (rc != 0) {
+                self.statusLabel.text = [NSString stringWithFormat:
+                    @"内核启动失败（rc=%d）。\n\n"
+                     "App 执行外部程序被拒绝。\n"
+                     "详细探测结果见 app.log 里的「exec 探测」那几行。", rc];
+                self.reloadButton.hidden = NO;
+            }
+        });
+    });
 }
 
-/// 探测 App 到底能不能 exec。
+#pragma mark - 直接 exec node
+
+static NSString *const kDSHJBRoot = @"/var/jb";
+static NSString *const kDSHInstallDir = @"/var/jb/usr/lib/dsh";
+static NSString *const kDSHDataRoot = @"/var/mobile/Media/deepseek-harness";
+
+/// launcher 会把选好的档位缓存到 $DSH_HOME/.dsh-tier。
+/// 读它就能知道这台设备该用哪一档，不必在 App 里重新探测。
+- (nullable NSString *)cachedTierName {
+    NSString *p = [kDSHDataRoot stringByAppendingPathComponent:@"data/.dsh-tier"];
+    NSString *s = [NSString stringWithContentsOfFile:p encoding:NSUTF8StringEncoding error:NULL];
+    s = [s stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    return s.length > 0 ? s : nil;
+}
+
+/// 与 tier.sh 里的 TIERS 表保持一致。
+- (NSArray<NSString *> *)tierArgsForName:(NSString *)name {
+    NSString *fetchShim = [kDSHInstallDir stringByAppendingPathComponent:@"fetch-shim.cjs"];
+    if ([name isEqualToString:@"native"]) return @[];
+    if ([name isEqualToString:@"single"]) return @[ @"--single-threaded" ];
+    if ([name isEqualToString:@"balanced"]) {
+        return @[ @"--single-threaded", @"--no-concurrent-recompilation",
+                  @"--no-concurrent-sparkplug", @"--no-wasm-async-compilation",
+                  @"--wasm-num-compilation-tasks=1", @"--no-wasm-tier-up" ];
+    }
+    if ([name isEqualToString:@"safe"]) {
+        return @[ @"--single-threaded", @"--no-concurrent-recompilation",
+                  @"--no-concurrent-sparkplug", @"--no-concurrent-sweeping",
+                  @"--no-concurrent-marking", @"--no-wasm-async-compilation",
+                  @"--wasm-num-compilation-tasks=1", @"--no-wasm-tier-up",
+                  @"--no-wasm-dynamic-tiering", @"--max-opt=1" ];
+    }
+    // nowasm 以及任何未知档位 → 用最保守的一档（完全不生成可执行代码）
+    return @[ @"--jitless", @"--require", fetchShim ];
+}
+
+/// 复刻 launcher 导出的环境变量。少一个都可能让内核起不来或行为异常。
+- (NSDictionary<NSString *, NSString *> *)kernelEnvironment {
+    NSString *cache = [kDSHDataRoot stringByAppendingPathComponent:@"cache"];
+    NSMutableDictionary *env = [@{
+        @"HOME": @"/var/mobile",
+        @"PATH": @"/var/jb/usr/bin:/var/jb/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+        @"NODE_PATH": [kDSHInstallDir stringByAppendingPathComponent:@"node_modules"],
+        @"DSH_NODE": [kDSHInstallDir stringByAppendingPathComponent:@"bin/node"],
+        @"DSH_ROOT": kDSHDataRoot,
+        @"DSH_HOME": [kDSHDataRoot stringByAppendingPathComponent:@"data"],
+        @"DSH_CONFIG_DIR": [kDSHDataRoot stringByAppendingPathComponent:@"config"],
+        @"DSH_WORKSPACES_DIR": [kDSHDataRoot stringByAppendingPathComponent:@"workspaces"],
+        @"DSH_LOG_DIR": [kDSHDataRoot stringByAppendingPathComponent:@"logs"],
+        @"DSH_CACHE_DIR": cache,
+        @"PIDFILE": [kDSHDataRoot stringByAppendingPathComponent:@"config/kernel.pid"],
+        @"PNPM_HOME": [cache stringByAppendingPathComponent:@"pnpm"],
+        @"XDG_DATA_HOME": [cache stringByAppendingPathComponent:@"pnpm-data"],
+        @"XDG_CACHE_HOME": [cache stringByAppendingPathComponent:@"pnpm-cache"],
+        @"npm_config_cache": [cache stringByAppendingPathComponent:@"npm-cache"],
+        @"npm_config_store_dir": [cache stringByAppendingPathComponent:@"pnpm/store"],
+        @"TMPDIR": [cache stringByAppendingPathComponent:@"tmp"],
+        @"LANG": @"en_US.UTF-8",
+    } mutableCopy];
+
+    // dsh.env 里的 DSH_WEB_PORT / NODE_OPTIONS 等也要带上
+    NSString *envf = @"/var/jb/etc/dsh/dsh.env";
+    NSString *text = [NSString stringWithContentsOfFile:envf encoding:NSUTF8StringEncoding error:NULL];
+    for (NSString *line in [text componentsSeparatedByString:@"\n"]) {
+        NSString *t = [line stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        if (t.length == 0 || [t hasPrefix:@"#"]) continue;
+        NSRange eq = [t rangeOfString:@"="];
+        if (eq.location == NSNotFound) continue;
+        NSString *key = [t substringToIndex:eq.location];
+        NSString *val = [t substringFromIndex:eq.location + 1];
+        // dsh.env 里是 shell 的 ${VAR:-default} 写法，取 default 部分
+        NSRange m = [val rangeOfString:@":-"];
+        if ([val hasPrefix:@"${"] && m.location != NSNotFound) {
+            NSRange close = [val rangeOfString:@"}" options:NSBackwardsSearch];
+            if (close.location != NSNotFound) {
+                val = [val substringWithRange:NSMakeRange(m.location + 2,
+                                                          close.location - m.location - 2)];
+            }
+        }
+        val = [val stringByTrimmingCharactersInSet:
+               [NSCharacterSet characterSetWithCharactersInString:@"\"'"]];
+        if (key.length > 0 && val.length > 0) env[key] = val;
+    }
+    return env;
+}
+
+/// 直接 exec node 起内核。返回 0 表示 spawn 成功（不等于内核已就绪）。
 ///
-/// 一直没搞清楚的事：access("/var/jb/usr/bin/dsh", X_OK) 成功，
-/// 但 posix_spawn 一律 ENOENT。可能性有两种：
-///   · 沙盒禁止 exec（连 /bin/sh 也不行）
-///   · 只是脚本的解释器 / 目标二进制被 AMFI 拒了
-/// 三种目标各试一次，把结果写进 app.log，就能分清。
-///
-/// 这决定了内核能不能由 App 拉起（launchd 那条路如果走不通，
-/// 这是唯一的备选）。
+/// 依次尝试三种方式，全部失败才返回最后一个错误码：
+///   1. 直接 exec node（最理想，绕开一切脚本）
+///   2. /bin/sh -c "exec node ..."（万一 node 需要 sh 的环境）
+///   3. /bin/sh <launcher> web ...（原来的方式，留作兜底）
+- (int)spawnKernelDirectly {
+    NSURLComponents *c = [NSURLComponents componentsWithString:self.baseURL];
+    NSString *port = [NSString stringWithFormat:@"%ld",
+                      (long)(c.port.integerValue ?: 3080)];
+
+    NSString *node = [kDSHInstallDir stringByAppendingPathComponent:@"bin/node"];
+    NSString *binJS = [kDSHInstallDir
+                       stringByAppendingPathComponent:@"node_modules/@deepseek-ai/dsh/lib/bin.js"];
+    NSString *imgShim = [kDSHInstallDir stringByAppendingPathComponent:@"ios-image-shim.mjs"];
+
+    NSString *tier = [self cachedTierName];
+    NSString *tierSource = tier ? @"缓存" : @"默认(nowasm)";
+    if (!tier) tier = @"nowasm";
+    NSArray *tierArgs = [self tierArgsForName:tier];
+
+    NSMutableArray *args = [NSMutableArray array];
+    [args addObjectsFromArray:tierArgs];
+    if ([[NSFileManager defaultManager] fileExistsAtPath:imgShim]) {
+        [args addObjectsFromArray:@[ @"--import", imgShim ]];
+    }
+    [args addObjectsFromArray:@[ @"--expose-internals", binJS,
+                                 @"web", @"--no-open", @"--port", port ]];
+
+    NSDictionary *env = [self kernelEnvironment];
+    NSString *logPath = [kDSHDataRoot stringByAppendingPathComponent:@"logs/app-spawn.log"];
+
+    DSHAppLog(@"起内核: tier=%@(%@) node=%@", tier, tierSource, node);
+    DSHAppLog(@"  args=%@", [args componentsJoinedByString:@" "]);
+
+    pid_t pid = 0;
+
+    // 方式 1：直接 exec node
+    int rc = [DSHShell spawnDetached:node args:args logPath:logPath env:env pid:&pid];
+    DSHAppLog(@"  方式1 直接 exec node → rc=%d pid=%d", rc, pid);
+    if (rc == 0) {
+        [self recordKernelPid:pid];
+        return 0;
+    }
+
+    // 方式 2：sh -c "exec node ..."
+    NSString *quoted = [NSString stringWithFormat:@"exec '%@' %@",
+                        node, [args componentsJoinedByString:@" "]];
+    pid = 0;
+    rc = [DSHShell spawnDetached:@"/bin/sh"
+                            args:@[ @"-c", quoted ]
+                         logPath:logPath env:env pid:&pid];
+    DSHAppLog(@"  方式2 sh -c exec node → rc=%d pid=%d", rc, pid);
+    if (rc == 0) {
+        [self recordKernelPid:pid];
+        return 0;
+    }
+
+    // 方式 3：sh 跑 launcher 脚本
+    NSString *launcher = @"/var/jb/usr/bin/dsh";
+    pid = 0;
+    rc = [DSHShell spawnDetached:@"/bin/sh"
+                            args:@[ launcher, @"web", @"--no-open", @"--port", port ]
+                         logPath:logPath env:env pid:&pid];
+    DSHAppLog(@"  方式3 sh launcher → rc=%d pid=%d", rc, pid);
+    if (rc == 0) [self recordKernelPid:pid];
+    return rc;
+}
+
+/// 记下内核 pid，dsh-ctl / App 的停止逻辑都靠它
+- (void)recordKernelPid:(pid_t)pid {
+    if (pid <= 0) return;
+    NSString *dir = [kDSHDataRoot stringByAppendingPathComponent:@"config"];
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir
+                             withIntermediateDirectories:YES attributes:nil error:NULL];
+    NSString *p = [dir stringByAppendingPathComponent:@"kernel.pid"];
+    [[NSString stringWithFormat:@"%d\n", pid] writeToFile:p atomically:NO
+                                                 encoding:NSUTF8StringEncoding error:NULL];
+    DSHAppLog(@"  已写 pidfile: %d", pid);
+}
+
 - (void)probeExecutables {
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSArray<NSArray *> *cases = @[
@@ -1533,8 +1709,10 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
                        || [subcommand isEqualToString:@"restart"]
                        || [subcommand isEqualToString:@"enable"];
             if (wantUp) {
-                // 监督进程拉起内核要几秒，等一会儿再探测
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)),
+                // 内核现在由 App 自己拉起（不再等 launchd），直接触发
+                [weakSelf ensureKernelRunning];
+                // 冷启动 20-60 秒，先等一会儿再开始探测
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
                                dispatch_get_main_queue(), ^{
                     [weakSelf probeKernelOnce];
                 });
