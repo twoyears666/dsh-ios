@@ -102,7 +102,10 @@ for sub in workspaces config data cache logs; do
 done
 
 # node 可执行
-[ -f "$D/bin/node" ] && chmod 755 "$D/bin/node"
+# node 在 App bundle 里（真机上只有 bundle 内的二进制能被执行）
+for _n in "$JB/Applications/DSH.app/runtime/node" "$D/bin/node"; do
+    [ -f "$_n" ] && chmod 755 "$_n" 2>/dev/null || true
+done
 
 # ---------------------------------------------------------------- 4. 原生 App
 APP="$JB/Applications/DSH.app"

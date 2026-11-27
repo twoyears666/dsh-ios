@@ -1,7 +1,10 @@
 #!/bin/sh
 # dsh-doctor —— 安装后自检
 D=/var/jb/usr/lib/dsh
-NODE="${DSH_NODE:-$D/bin/node}"
+# node 优先用 App bundle 里那份：
+#   真机上 App 只有 exec 被挡（读文件正常），而执行自己 bundle 内的二进制是允许的。
+NODE="${DSH_NODE:-/var/jb/Applications/DSH.app/runtime/node}"
+[ -x "$NODE" ] || NODE="$D/bin/node"
 OK=0
 FAIL=0
 

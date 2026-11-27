@@ -318,6 +318,25 @@ sh build/scripts/smoke-maintainer.sh
 `verify-payload.sh` 误判，所以它声明了 `verify-allow-patterns` 豁免标记；
 豁免只跳过模式匹配类检查，`set -e` / `exit 0` / shebang 照样查。
 
+### node 放进 App bundle
+
+真机上 App **只有 exec 被挡**：`access("/var/jb/usr/bin/dsh", X_OK)` 成功、
+`app.log` 也能写，但 `posix_spawn` 一律 `ENOENT`。而 **执行自己 bundle 里的
+二进制是允许的**（iOS 的标准行为）。
+
+所以：
+
+```
+DSH.app/runtime/node                        ← node 二进制（唯一需要 exec 的东西）
+/var/jb/usr/lib/dsh/node_modules/...        ← 依赖树，node 只「读」，不受限
+```
+
+`node_modules` 留在 `/var/jb`，因为 node 起来之后只是读文件，不涉及 exec。
+deb 体积不变（`mv` 而不是 `cp`）。
+
+四个入口都优先用 bundle 里那份 node，找不到才回退老路径：
+`dsh`、`dsh-doctor`、`pnpm`、`tier.sh`。
+
 ### 内核由 App 直接拉起（不再依赖 launchd）
 
 真机 `install.log` 证明 launchd 这条路过不去：

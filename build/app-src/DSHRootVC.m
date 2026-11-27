@@ -279,6 +279,7 @@ static void DSHAppLog(NSString *fmt, ...) {
 - (NSDictionary<NSString *, NSString *> *)kernelEnvironment;
 - (void)recordKernelPid:(pid_t)pid;
 - (void)observeAppLifecycle;
+- (nullable NSString *)bundledNodePath;
 - (void)handleProbeResult:(BOOL)up;
 - (void)loadWithToken:(nullable NSString *)token;
 - (nullable NSString *)scrapeTokenFromLog;
@@ -646,7 +647,7 @@ static NSString *const kDSHDataRoot = @"/var/mobile/Media/deepseek-harness";
         @"HOME": @"/var/mobile",
         @"PATH": @"/var/jb/usr/bin:/var/jb/bin:/usr/bin:/bin:/usr/sbin:/sbin",
         @"NODE_PATH": [kDSHInstallDir stringByAppendingPathComponent:@"node_modules"],
-        @"DSH_NODE": [kDSHInstallDir stringByAppendingPathComponent:@"bin/node"],
+        @"DSH_NODE": ([self bundledNodePath] ?: [kDSHInstallDir stringByAppendingPathComponent:@"bin/node"]),
         @"DSH_ROOT": kDSHDataRoot,
         @"DSH_HOME": [kDSHDataRoot stringByAppendingPathComponent:@"data"],
         @"DSH_CONFIG_DIR": [kDSHDataRoot stringByAppendingPathComponent:@"config"],
@@ -689,6 +690,32 @@ static NSString *const kDSHDataRoot = @"/var/mobile/Media/deepseek-harness";
     return env;
 }
 
+/// node 二进制放在哪。
+///
+/// 关键发现：真机上 **只有 exec 被挡，读文件是正常的** ——
+/// access("/var/jb/usr/bin/dsh", X_OK) 成功、app.log 也能写，
+/// 但 posix_spawn 一律 ENOENT。
+///
+/// 而 App 执行**自己 bundle 里的**二进制是允许的（iOS 的标准行为）。
+/// 所以把 node 放进 DSH.app/runtime/node，App 就能 exec 它；
+/// node_modules 仍然留在 /var/jb —— node 起来之后只是「读」那些文件，
+/// 不涉及 exec，不受影响。
+///
+/// 这样 deb 体积不变（node 只是从 /var/jb 挪进 bundle，不是复制一份）。
+- (nullable NSString *)bundledNodePath {
+    NSString *inBundle = [[[NSBundle mainBundle] bundlePath]
+                          stringByAppendingPathComponent:@"runtime/node"];
+    if (access(inBundle.fileSystemRepresentation, X_OK) == 0) {
+        return inBundle;
+    }
+    // 回退：老布局（node 在 /var/jb 下）
+    NSString *legacy = [kDSHInstallDir stringByAppendingPathComponent:@"bin/node"];
+    if (access(legacy.fileSystemRepresentation, X_OK) == 0) {
+        return legacy;
+    }
+    return nil;
+}
+
 /// 直接 exec node 起内核。返回 0 表示 spawn 成功（不等于内核已就绪）。
 ///
 /// 依次尝试三种方式，全部失败才返回最后一个错误码：
@@ -700,7 +727,7 @@ static NSString *const kDSHDataRoot = @"/var/mobile/Media/deepseek-harness";
     NSString *port = [NSString stringWithFormat:@"%ld",
                       (long)(c.port.integerValue ?: 3080)];
 
-    NSString *node = [kDSHInstallDir stringByAppendingPathComponent:@"bin/node"];
+    NSString *node = [self bundledNodePath];
     NSString *binJS = [kDSHInstallDir
                        stringByAppendingPathComponent:@"node_modules/@deepseek-ai/dsh/lib/bin.js"];
     NSString *imgShim = [kDSHInstallDir stringByAppendingPathComponent:@"ios-image-shim.mjs"];

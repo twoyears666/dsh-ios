@@ -34,7 +34,9 @@
 # ============================================================================
 
 D=/var/jb/usr/lib/dsh
-TIER_NODE=${DSH_NODE:-$D/bin/node}
+# node 优先用 App bundle 里那份（真机上只有 exec 被挡，bundle 内可以执行）
+TIER_NODE=${DSH_NODE:-/var/jb/Applications/DSH.app/runtime/node}
+[ -x "$TIER_NODE" ] || TIER_NODE="$D/bin/node"
 TIER_SMOKE=$D/smoke.js
 TIER_CACHE=${DSH_HOME:-/var/jb/var/mobile/.dsh}/.dsh-tier
 
