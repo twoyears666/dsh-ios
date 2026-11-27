@@ -242,6 +242,10 @@ static void DSHAppLog(NSString *fmt, ...) {
 /// 已经因为 401 回退到「抓 token」流程了。
 /// 内核打过回环免 token 补丁时永远是 NO，token 那套逻辑根本不会跑。
 @property (nonatomic, assign) BOOL retriedWithToken;
+/// 用户刚点过「停止 / 清除进程」。
+/// 探测超时后的自动重试会调 ensureKernelRunning，那里会写 kernel.want，
+/// 等于把用户刚清掉的进程又拉起来 —— 必须挡住。
+@property (nonatomic, assign) BOOL suppressAutoStart;
 
 @property (nonatomic, assign) BOOL kernelReady;
 @property (nonatomic, assign) NSInteger kernelProbeTries;
@@ -523,6 +527,10 @@ static void DSHAppLog(NSString *fmt, ...) {
     NSString *configDir = @"/var/mobile/Media/deepseek-harness/config";
     NSString *wantPath = [configDir stringByAppendingPathComponent:@"kernel.want"];
 
+    if (self.suppressAutoStart) {
+        DSHAppLog(@"用户刚停止过内核，不自动写 kernel.want");
+        return;
+    }
     if (DSHKernelStarting()) {
         DSHAppLog(@"内核进程已在运行（pidfile 有活进程），不重复请求");
         return;
@@ -1438,6 +1446,11 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     //   有 want → 起；没 want 但保活没关 → 起；否则停。
     DSHAppLog(@"ctl %@", subcommand);
     [self toast:message];
+
+    // ctl: 都在主线程调用，直接置位即可。
+    // stop/clear 之后不许自动重试把内核又拉起来；start/restart/enable 解除抑制。
+    BOOL stopping = [subcommand isEqualToString:@"stop"] || [subcommand isEqualToString:@"clear"];
+    self.suppressAutoStart = stopping;
 
     NSString *configDir = @"/var/mobile/Media/deepseek-harness/config";
     NSString *wantPath  = [configDir stringByAppendingPathComponent:@"kernel.want"];
