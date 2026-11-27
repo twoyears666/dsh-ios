@@ -1,15 +1,20 @@
 //
 //  DSHRootVC.m
-//  dsh iOS 原生外壳 —— 还原 macOS 桌面端布局
+//  dsh iOS 原生外壳 —— Electron BrowserWindow 的等价物
 //
 //  桌面端结构（Electron main.js）：
-//    BrowserWindow { titleBarStyle: "hidden", vibrancy: "sidebar" }
-//      ├─ 左侧会话/工作区侧边栏
-//      └─ 右侧 dsh-web-app 界面
+//    BrowserWindow { titleBarStyle: "hidden" }
+//      └─ dsh-web-app —— 整个 UI 都在网页里
 //
-//  本实现用 UISplitViewController 等价：
-//    primary   = 原生会话列表（UIKit TableView，直连 dsh API）
-//    secondary = WKWebView 加载同一份 dsh-web-app UI
+//  本实现的对应关系：
+//    整个窗口          = 一个全屏 WKWebView
+//    7 个 preload API  = DSHBridge（WKUserContentController 注入）
+//    <webview>         = WKWebView（agent 浏览器 tab，原生里的 iframe）
+//    菜单栏            = UIMenu（右上角 ⋯）
+//
+//  原生侧只做 web UI 做不到的事：内核进程生命周期、preload API、
+//  语音输入、进程枚举、日志。侧边栏 / 会话列表 / 设置页一律交给 web UI，
+//  不在 UIKit 里重写一遍 —— 重写只会两边不一致。
 //
 #import "DSHRootVC.h"
 #import "DSHBridge.h"
@@ -191,35 +196,50 @@ static void DSHAppLog(NSString *fmt, ...) {
 }
 #pragma mark - DSHRootVC
 
-@interface DSHRootVC () <WKNavigationDelegate, WKUIDelegate, UITableViewDelegate, UITableViewDataSource,
-                          DSHBridgeDelegate, DSHBrowserBridgeDelegate, DSHBrowserControlDelegate, UIDocumentPickerDelegate, DSHMenuDelegate>
+//  重写后的外壳只有一层：全屏 WKWebView。
+//
+//  为什么去掉原生侧边栏 / 会话列表：
+//    桌面端就是 BrowserWindow 里装一个 web 页面，侧边栏、会话列表、
+//    设置页全是 web UI 自己渲染的。之前那套 UISplitViewController +
+//    UITableView 是把 web UI 已有的东西又用 UIKit 写了一遍 ——
+//    两边会不一致，而且 web 前端每次改版原生侧都要跟着改。
+//    现在原生只负责「web UI 做不到的事」：
+//      · 内核进程生命周期（web UI 起不来之前就得有）
+//      · Electron 的 7 个 preload API
+//      · agent 操作浏览器的 WKWebView（原生里的 iframe）
+//      · 语音输入、进程枚举、日志
+@interface DSHRootVC () <WKNavigationDelegate, WKUIDelegate,
+                          DSHBridgeDelegate, DSHBrowserBridgeDelegate, DSHBrowserControlDelegate,
+                          UIDocumentPickerDelegate, DSHMenuDelegate>
 
 @property (nonatomic, strong) WKWebView *webView;
 @property (nonatomic, strong) DSHBridge *bridge;
 @property (nonatomic, strong) DSHMenu *menu;
 @property (nonatomic, strong) DSHBrowserBridge *browserBridge;
 @property (nonatomic, strong) DSHBrowserControl *browserControl;
-@property (nonatomic, strong) UISplitViewController *splitVC;
-@property (nonatomic, strong) UINavigationController *rightNav;
+/// agent 浏览器 tab：tabId -> WKWebView（原生里最接近 iframe 的东西）
 @property (nonatomic, strong) NSMutableDictionary<NSString *, WKWebView *> *agentTabs;
-@property (nonatomic, strong) UITableView *sidebar;
-@property (nonatomic, strong) UIRefreshControl *refresh;
+
+// 启动遮罩：内核冷启动 20-60 秒，这段时间 web UI 加载不出来，
+// 只能原生兜住。
+@property (nonatomic, strong) UIView *loadingOverlay;
 @property (nonatomic, strong) UIActivityIndicatorView *spinner;
 @property (nonatomic, strong) UILabel *statusLabel;
 @property (nonatomic, strong) UIButton *reloadButton;
 @property (nonatomic, strong) UISwitch *keepAliveSwitch;
 @property (nonatomic, strong) UILabel *keepAliveLabel;
 @property (nonatomic, strong) UIButton *clearProcessButton;
+/// 悬浮菜单按钮。导航栏隐藏（web 页面要真正全屏），用它代替右上角的 ⋯。
+@property (nonatomic, strong) UIButton *menuButton;
+
 /// 已经因为 401 回退到「抓 token」流程了。
 /// 内核打过回环免 token 补丁时永远是 NO，token 那套逻辑根本不会跑。
 @property (nonatomic, assign) BOOL retriedWithToken;
-@property (nonatomic, strong) UIView *loadingOverlay;
 
-@property (nonatomic, strong) NSMutableArray<NSDictionary *> *sessions;
 @property (nonatomic, assign) BOOL kernelReady;
 @property (nonatomic, assign) NSInteger kernelProbeTries;
 @property (nonatomic, assign) NSInteger kernelStartAttempts;
-@property (nonatomic, strong) NSTimer *loadProgressTimer;
+@property (nonatomic, strong, nullable) NSTimer *loadProgressTimer;
 @property (nonatomic, assign) NSInteger authRetryCount;
 
 // 目录选择器回调
@@ -233,6 +253,7 @@ static void DSHAppLog(NSString *fmt, ...) {
 - (void)ctl:(NSString *)subcommand message:(NSString *)message;
 - (void)confirmStopKernel;
 - (void)confirmClearProcess;
+- (void)restartKernel;
 - (void)startVoiceInput;
 - (void)injectVoiceText:(NSString *)text;
 - (DSHVoice *)voice;
@@ -243,10 +264,14 @@ static void DSHAppLog(NSString *fmt, ...) {
 - (void)handleProbeResult:(BOOL)up;
 - (void)loadWithToken:(nullable NSString *)token;
 - (nullable NSString *)scrapeTokenFromLog;
-- (void)refreshSessions;
 - (void)showLoadError:(NSError *)error;
 - (void)startLoadProgressTimer;
 - (void)clearAuthCookies;
+- (void)toast:(NSString *)text;
+- (void)runDoctor;
+- (nullable NSString *)installedKernelVersion;
+- (nullable NSString *)nodeVersionString;
+- (nullable NSString *)currentURLString;
 
 @end
 
@@ -263,7 +288,6 @@ static void DSHAppLog(NSString *fmt, ...) {
               [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?",
               [self installedKernelVersion] ?: @"(未知)");
 
-    self.sessions = [NSMutableArray array];
     if (!self.baseURL) {
         // DSH_WEB_URL 可能带 ?token=xxx，必须剥掉 query，
         // 否则后面再拼 ?token= 会变成 .../?token=abc/?token=xyz（无效 URL）。
@@ -285,7 +309,6 @@ static void DSHAppLog(NSString *fmt, ...) {
 
     self.view.backgroundColor = [UIColor systemBackgroundColor];
 
-    // 菜单（还原 Electron 菜单栏）
     self.menu = [[DSHMenu alloc] init];
     self.menu.delegate = self;
 
@@ -293,6 +316,7 @@ static void DSHAppLog(NSString *fmt, ...) {
     [self observeBridgeReplies];
     [self startKernelWatch];
 }
+
 
 /// DSHBridge 通过通知把 JS 回注请求转过来（避免 bridge 直接持有 webView）
 - (void)observeBridgeReplies {
@@ -310,29 +334,21 @@ static void DSHAppLog(NSString *fmt, ...) {
 
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
+    // 加载本身由内核探测成功后触发（handleProbeResult），
+    // 这里只负责启动 agent 浏览器控制端点。
     [self startBrowserControlIfNeeded];
-    [self loadWorkbench];
 }
 
 #pragma mark - 布局
 
+/// 唯一的主视图：全屏 WKWebView，加一层启动遮罩。
+///
+/// 遮罩用 UIStackView 垂直排列，替代原来那几十条逐条 constraint。
 - (void)buildLayout {
-    // ---- 左：会话侧边栏 ----
-    self.sidebar = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStyleInsetGrouped];
-    self.sidebar.delegate = self;
-    self.sidebar.dataSource = self;
-    self.sidebar.backgroundColor = [UIColor secondarySystemBackgroundColor];
-    [self.sidebar registerClass:[UITableViewCell class] forCellReuseIdentifier:@"cell"];
-
-    self.refresh = [[UIRefreshControl alloc] init];
-    [self.refresh addTarget:self action:@selector(refreshSessions) forControlEvents:UIControlEventValueChanged];
-    self.sidebar.refreshControl = self.refresh;
-
-    // ---- 右：WKWebView ----
+    // ---- 主视图 ----
     WKWebViewConfiguration *cfg = [[WKWebViewConfiguration alloc] init];
     cfg.allowsInlineMediaPlayback = YES;
     cfg.mediaTypesRequiringUserActionForPlayback = WKAudiovisualMediaTypeNone;
-    // 允许本地 http（ATS 已在 Info.plist 放行）
     cfg.websiteDataStore = [WKWebsiteDataStore defaultDataStore];
 
     // 注入 Electron 外壳的 7 个 API 等价实现
@@ -340,7 +356,7 @@ static void DSHAppLog(NSString *fmt, ...) {
     self.bridge.delegate = self;
     [self.bridge attachToConfiguration:cfg];
 
-    // 侧边栏浏览器：dshDesktop.browser 协议（<webview> → 原生 WKWebView）
+    // dshDesktop.browser 协议：<webview> → 原生 WKWebView
     self.browserBridge = [[DSHBrowserBridge alloc] init];
     self.browserBridge.delegate = self;
 
@@ -356,41 +372,51 @@ static void DSHAppLog(NSString *fmt, ...) {
     self.webView.allowsBackForwardNavigationGestures = YES;
     self.webView.opaque = NO;
     self.webView.backgroundColor = [UIColor systemBackgroundColor];
+    self.webView.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:self.webView];
 
-    // ---- 加载遮罩 ----
+    [NSLayoutConstraint activateConstraints:@[
+        [self.webView.topAnchor constraintEqualToAnchor:self.view.topAnchor],
+        [self.webView.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+        [self.webView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [self.webView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+    ]];
+
+    // ---- 启动遮罩 ----
     self.loadingOverlay = [[UIView alloc] init];
     self.loadingOverlay.backgroundColor = [UIColor systemBackgroundColor];
+    self.loadingOverlay.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:self.loadingOverlay];
 
-    self.spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleLarge];
+    self.spinner = [[UIActivityIndicatorView alloc]
+                    initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleLarge];
     [self.spinner startAnimating];
 
     self.statusLabel = [[UILabel alloc] init];
     self.statusLabel.text = @"正在启动 dsh 内核…";
     self.statusLabel.textAlignment = NSTextAlignmentCenter;
     self.statusLabel.numberOfLines = 0;
-    self.statusLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+    self.statusLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
     self.statusLabel.textColor = [UIColor secondaryLabelColor];
 
     self.reloadButton = [UIButton buttonWithType:UIButtonTypeSystem];
     [self.reloadButton setTitle:@"重试" forState:UIControlStateNormal];
-    [self.reloadButton addTarget:self action:@selector(loadWorkbench) forControlEvents:UIControlEventTouchUpInside];
+    self.reloadButton.titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+    [self.reloadButton addTarget:self
+                          action:@selector(loadWorkbench)
+                forControlEvents:UIControlEventTouchUpInside];
     self.reloadButton.hidden = YES;
 
-    // 保活开关：放在错误/加载界面，用户点得到
+    self.keepAliveLabel = [[UILabel alloc] init];
+    self.keepAliveLabel.text = @"后台保活";
+    self.keepAliveLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
+
     self.keepAliveSwitch = [[UISwitch alloc] init];
     self.keepAliveSwitch.on = [self keepAliveEnabled];
     [self.keepAliveSwitch addTarget:self
                              action:@selector(keepAliveSwitchChanged:)
                    forControlEvents:UIControlEventValueChanged];
 
-    self.keepAliveLabel = [[UILabel alloc] init];
-    self.keepAliveLabel.text = @"后台保活";
-    self.keepAliveLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
-    self.keepAliveLabel.textColor = [UIColor secondaryLabelColor];
-
-    // 清除进程：紧跟在保活开关下面。
-    // 用途：更新版本后旧内核还占着端口，或者内核卡死点不动了。
-    // 行为：关掉保活 + 杀干净内核进程（clear 子命令），之后不会自动拉起。
     self.clearProcessButton = [UIButton buttonWithType:UIButtonTypeSystem];
     [self.clearProcessButton setTitle:@"清除进程" forState:UIControlStateNormal];
     self.clearProcessButton.titleLabel.font =
@@ -400,109 +426,63 @@ static void DSHAppLog(NSString *fmt, ...) {
                                 action:@selector(confirmClearProcess)
                       forControlEvents:UIControlEventTouchUpInside];
 
-    for (UIView *v in @[self.spinner, self.statusLabel, self.reloadButton,
-                        self.keepAliveSwitch, self.keepAliveLabel,
-                        self.clearProcessButton]) {
-        v.translatesAutoresizingMaskIntoConstraints = NO;
-        [self.loadingOverlay addSubview:v];
-    }
-    UILayoutGuide *safe = self.loadingOverlay.safeAreaLayoutGuide;
-    [NSLayoutConstraint activateConstraints:@[
-        [self.spinner.centerXAnchor constraintEqualToAnchor:safe.centerXAnchor],
-        [self.spinner.centerYAnchor constraintEqualToAnchor:safe.centerYAnchor constant:-40],
+    UIStackView *keepAliveRow = [[UIStackView alloc]
+                                 initWithArrangedSubviews:@[ self.keepAliveLabel, self.keepAliveSwitch ]];
+    keepAliveRow.axis = UILayoutConstraintAxisHorizontal;
+    keepAliveRow.spacing = 8;
+    keepAliveRow.alignment = UIStackViewAlignmentCenter;
 
-        [self.statusLabel.topAnchor constraintEqualToAnchor:self.spinner.bottomAnchor constant:20],
-        [self.statusLabel.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:32],
-        [self.statusLabel.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-32],
-
-        [self.reloadButton.topAnchor constraintEqualToAnchor:self.statusLabel.bottomAnchor constant:20],
-        [self.reloadButton.centerXAnchor constraintEqualToAnchor:safe.centerXAnchor],
-        [self.reloadButton.widthAnchor constraintEqualToConstant:120],
-        [self.reloadButton.heightAnchor constraintEqualToConstant:44],
-
-        [self.keepAliveSwitch.centerXAnchor constraintEqualToAnchor:safe.centerXAnchor constant:34],
-        [self.keepAliveSwitch.topAnchor constraintEqualToAnchor:self.reloadButton.bottomAnchor constant:24],
-
-        [self.keepAliveLabel.trailingAnchor constraintEqualToAnchor:self.keepAliveSwitch.leadingAnchor constant:-10],
-        [self.keepAliveLabel.centerYAnchor constraintEqualToAnchor:self.keepAliveSwitch.centerYAnchor],
-
-        [self.clearProcessButton.topAnchor constraintEqualToAnchor:self.keepAliveSwitch.bottomAnchor constant:12],
-        [self.clearProcessButton.centerXAnchor constraintEqualToAnchor:safe.centerXAnchor],
-        [self.clearProcessButton.heightAnchor constraintEqualToConstant:36],
+    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[
+        self.spinner, self.statusLabel, self.reloadButton, keepAliveRow, self.clearProcessButton,
     ]];
+    stack.axis = UILayoutConstraintAxisVertical;
+    stack.alignment = UIStackViewAlignmentCenter;
+    stack.spacing = 16;
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.loadingOverlay addSubview:stack];
 
-    // ---- UISplitViewController（iPad / iPhone 自适应）----
-    // 注意：不要用 leftVC.view = xxx 直接赋值 —— 那样 viewDidLoad 不会触发，
-    // 且 UIKit 会警告 "loadView called ... but did not set a view"。
-    // 正确做法是给一个真正的容器 VC 覆写 loadView，或把子视图 addSubview。
-    UIViewController *leftVC = [[UIViewController alloc] init];
-    leftVC.view = [[UIView alloc] init];
-    leftVC.view.backgroundColor = [UIColor secondarySystemBackgroundColor];
-    self.sidebar.translatesAutoresizingMaskIntoConstraints = NO;
-    [leftVC.view addSubview:self.sidebar];
-    [NSLayoutConstraint activateConstraints:@[
-        [self.sidebar.topAnchor constraintEqualToAnchor:leftVC.view.topAnchor],
-        [self.sidebar.bottomAnchor constraintEqualToAnchor:leftVC.view.bottomAnchor],
-        [self.sidebar.leadingAnchor constraintEqualToAnchor:leftVC.view.leadingAnchor],
-        [self.sidebar.trailingAnchor constraintEqualToAnchor:leftVC.view.trailingAnchor],
-    ]];
-    leftVC.title = @"会话";
-
-    UIViewController *rightVC = [[UIViewController alloc] init];
-    rightVC.view = [[UIView alloc] init];
-    self.webView.translatesAutoresizingMaskIntoConstraints = NO;
-    [rightVC.view addSubview:self.webView];
-    [NSLayoutConstraint activateConstraints:@[
-        [self.webView.topAnchor constraintEqualToAnchor:rightVC.view.topAnchor],
-        [self.webView.bottomAnchor constraintEqualToAnchor:rightVC.view.bottomAnchor],
-        [self.webView.leadingAnchor constraintEqualToAnchor:rightVC.view.leadingAnchor],
-        [self.webView.trailingAnchor constraintEqualToAnchor:rightVC.view.trailingAnchor],
-    ]];
-    rightVC.title = @"DeepSeek Harness";
-
-    // 导航栏右侧的"更多"菜单按钮（还原 Electron 菜单栏）
-    rightVC.navigationItem.rightBarButtonItem =
-        [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"ellipsis.circle"]
-                                         menu:[self.menu buildMainMenuRunning:NO
-                                                                    keepAlive:[self keepAliveEnabled]]];
-
-    // 左侧导航栏标题
-    leftVC.navigationItem.title = @"会话";
-
-    UISplitViewController *split = [[UISplitViewController alloc] init];
-    UINavigationController *rightNav = [[UINavigationController alloc] initWithRootViewController:rightVC];
-    self.splitVC = split;
-    self.rightNav = rightNav;
-    split.viewControllers = @[
-        [[UINavigationController alloc] initWithRootViewController:leftVC],
-        rightNav,
-    ];
-    split.preferredDisplayMode = UISplitViewControllerDisplayModeAllVisible;
-    split.preferredPrimaryColumnWidthFraction = 0.28;
-    split.minimumPrimaryColumnWidth = 240;
-    split.maximumPrimaryColumnWidth = 380;
-
-    [self addChildViewController:split];
-    split.view.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.view addSubview:split.view];
-    [NSLayoutConstraint activateConstraints:@[
-        [split.view.topAnchor constraintEqualToAnchor:self.view.topAnchor],
-        [split.view.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
-        [split.view.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
-        [split.view.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
-    ]];
-    [split didMoveToParentViewController:self];
-
-    // 加载遮罩覆盖全屏
-    self.loadingOverlay.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.view addSubview:self.loadingOverlay];
+    UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
     [NSLayoutConstraint activateConstraints:@[
         [self.loadingOverlay.topAnchor constraintEqualToAnchor:self.view.topAnchor],
         [self.loadingOverlay.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
         [self.loadingOverlay.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
         [self.loadingOverlay.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+
+        [stack.centerYAnchor constraintEqualToAnchor:safe.centerYAnchor],
+        [stack.centerXAnchor constraintEqualToAnchor:safe.centerXAnchor],
+        [stack.leadingAnchor constraintGreaterThanOrEqualToAnchor:safe.leadingAnchor constant:24],
+        [stack.trailingAnchor constraintLessThanOrEqualToAnchor:safe.trailingAnchor constant:-24],
+        [stack.widthAnchor constraintLessThanOrEqualToConstant:420],
+
+        [self.statusLabel.widthAnchor constraintLessThanOrEqualToConstant:420],
+        [self.clearProcessButton.heightAnchor constraintEqualToConstant:36],
     ]];
+
+    // ---- 悬浮菜单按钮 ----
+    // 导航栏隐藏了（Electron 的 titleBarStyle: "hidden" 是同一个意思），
+    // 所以菜单挂在右上角这个小圆钮上，点一下直接弹 UIMenu。
+    self.menuButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    [self.menuButton setImage:[UIImage systemImageNamed:@"ellipsis.circle.fill"]
+                     forState:UIControlStateNormal];
+    self.menuButton.tintColor = [UIColor secondaryLabelColor];
+    self.menuButton.backgroundColor = [UIColor tertiarySystemBackgroundColor];
+    self.menuButton.layer.cornerRadius = 16;
+    // 略微透明：底下可能是 web UI 自己的按钮，别完全挡住
+    self.menuButton.alpha = 0.9;
+    self.menuButton.showsMenuAsPrimaryAction = YES;
+    self.menuButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:self.menuButton];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [self.menuButton.topAnchor constraintEqualToAnchor:safe.topAnchor constant:8],
+        [self.menuButton.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-8],
+        [self.menuButton.widthAnchor constraintEqualToConstant:32],
+        [self.menuButton.heightAnchor constraintEqualToConstant:32],
+    ]];
+
+    [self refreshMenu];
 }
+
 
 #pragma mark - 内核探测
 
@@ -636,7 +616,6 @@ static void DSHAppLog(NSString *fmt, ...) {
     });
 }
 
-
 #pragma mark - 加载工作台
 
 - (void)loadWorkbench {
@@ -767,7 +746,8 @@ static void DSHAppLog(NSString *fmt, ...) {
     [self.loadProgressTimer invalidate];
     [self.spinner stopAnimating];
     self.loadingOverlay.hidden = YES;
-    [self refreshSessions];
+    // 会话列表由 web UI 自己拉，这里不再重复请求 /api
+    [self refreshMenu];
 }
 
 - (void)webView:(WKWebView *)webView didFailNavigation:(WKNavigation *)navigation withError:(NSError *)error {
@@ -832,64 +812,6 @@ static void DSHAppLog(NSString *fmt, ...) {
             }
         }
     }];
-}
-
-#pragma mark - 会话列表
-
-- (void)refreshSessions {
-    // dsh 的会话数据在 $DSH_HOME/sessions 下，这里先做目录级展示；
-    // 完整会话元数据走 /api，等内核就绪后再接。
-    [self.refresh endRefreshing];
-
-    NSString *sessionsDir = @"/var/jb/var/mobile/.dsh/sessions";
-    NSFileManager *fm = [NSFileManager defaultManager];
-    NSArray<NSString *> *items = [fm contentsOfDirectoryAtPath:sessionsDir error:NULL];
-
-    [self.sessions removeAllObjects];
-    for (NSString *name in items) {
-        if ([name hasPrefix:@"."]) continue;
-        NSString *full = [sessionsDir stringByAppendingPathComponent:name];
-        NSDictionary *attrs = [fm attributesOfItemAtPath:full error:NULL];
-        [self.sessions addObject:@{
-            @"name": name,
-            @"path": full,
-            @"date": attrs[NSFileModificationDate] ?: [NSDate date],
-        }];
-    }
-    [self.sessions sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
-        return [b[@"date"] compare:a[@"date"]];
-    }];
-    [self.sidebar reloadData];
-}
-
-- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    return MAX((NSInteger)self.sessions.count, 1);
-}
-
-- (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
-    return self.sessions.count ? @"最近会话" : @"暂无会话";
-}
-
-- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
-    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"cell" forIndexPath:indexPath];
-    if (self.sessions.count == 0) {
-        cell.textLabel.text = @"打开工作台开始对话";
-        cell.textLabel.textColor = [UIColor secondaryLabelColor];
-        cell.selectionStyle = UITableViewCellSelectionStyleNone;
-    } else {
-        NSDictionary *s = self.sessions[indexPath.row];
-        cell.textLabel.text = s[@"name"];
-        cell.textLabel.textColor = [UIColor labelColor];
-        cell.selectionStyle = UITableViewCellSelectionStyleDefault;
-    }
-    return cell;
-}
-
-- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
-    [tableView deselectRowAtIndexPath:indexPath animated:YES];
-    if (self.sessions.count == 0) return;
-    // 会话切换交给 web UI 自己处理（它有自己的路由）
-    [self loadWorkbench];
 }
 
 #pragma mark - DSHBridgeDelegate
@@ -997,7 +919,6 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     NSString *arr = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
     return [arr substringWithRange:NSMakeRange(1, arr.length - 2)];
 }
-
 
 #pragma mark - DSHBrowserControlDelegate（agent 操作浏览器）
 
@@ -1221,7 +1142,7 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
 - (void)menuDidSelect:(DSHMenuAction)action {
     switch (action) {
         case DSHMenuActionNewSession:
-            // 交给 web UI 的新建会话路由
+            // 新建会话交给 web UI 自己的路由 —— 原生侧不重复实现
             [self.webView evaluateJavaScript:
              @"(function(){var b=document.querySelector('[data-testid=\"new-session\"],button[aria-label*=\"New\"],button[aria-label*=\"新\"]');if(b)b.click();})();"
                                  completionHandler:nil];
@@ -1250,15 +1171,11 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
             break;
         }
 
-        case DSHMenuActionShowSessions:
-            [self refreshSessions];
-            break;
-
         case DSHMenuActionSettings: {
             UIAlertController *a = [UIAlertController
                 alertControllerWithTitle:@"设置"
                                  message:[NSString stringWithFormat:
-                                          @"内核：%@\n端口：3080\nDSH_HOME：/var/jb/var/mobile/.dsh",
+                                          @"内核：%@\n端口：3080\nDSH_HOME：/var/mobile/Media/deepseek-harness/data",
                                           self.baseURL]
                           preferredStyle:UIAlertControllerStyleAlert];
             [a addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleCancel handler:nil]];
@@ -1294,8 +1211,7 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
             break;
 
         case DSHMenuActionProcessList: {
-            // 设备上没有 ps/pgrep，这里走 sysctl 原生枚举。
-            // 同时写进 app.log，事后也能翻。
+            // 设备上没有 ps/pgrep，这里走 sysctl 原生枚举。同时写进 app.log。
             NSString *report = [DSHProc dshProcessReport];
             DSHAppLog(@"进程列表:\n%@", report);
             UIAlertController *a = [UIAlertController
@@ -1327,11 +1243,15 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
                                           ver, kernelVer, nodeVer]
                           preferredStyle:UIAlertControllerStyleAlert];
             [a addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleCancel handler:nil]];
-            [self presentViewController:a animated:YES completion:nil];
+            [self presentViewController:a animated:YES completion:^{
+                // 「关于」页看过就把版本号写进日志，排查时能对上
+                DSHAppLog(@"关于: 外壳 %@ / 内核 %@ / Node %@", ver, kernelVer, nodeVer);
+            }];
             break;
         }
     }
 }
+
 
 #pragma mark - 辅助
 
@@ -1379,13 +1299,8 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
 
 /// 重建导航栏菜单，反映最新状态
 - (void)refreshMenu {
-    // 直接用手上持有的右栏 nav，不去遍历 childViewControllers
-    UINavigationController *rightNav = self.rightNav;
-    if (!rightNav) return;
-    rightNav.topViewController.navigationItem.rightBarButtonItem =
-        [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"ellipsis.circle"]
-                                         menu:[self.menu buildMainMenuRunning:self.kernelReady
-                                                                    keepAlive:[self keepAliveEnabled]]];
+    self.menuButton.menu = [self.menu buildMainMenuRunning:self.kernelReady
+                                                 keepAlive:[self keepAliveEnabled]];
 }
 
 - (nullable NSString *)currentURLString {

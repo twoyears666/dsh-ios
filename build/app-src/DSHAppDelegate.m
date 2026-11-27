@@ -17,7 +17,13 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
     // 深/浅色跟随系统
     self.window.overrideUserInterfaceStyle = UIUserInterfaceStyleUnspecified;
 
-    self.window.rootViewController = root;
+    // 包一层导航控制器：给 VC 一个标准容器（返回手势、以后 push 面板都能用），
+    // 但把导航栏藏掉 —— 外壳是 Electron 那种「网页铺满整个窗口」的形态，
+    // 菜单走 DSHRootVC 里的悬浮按钮。
+    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:root];
+    nav.navigationBarHidden = YES;
+
+    self.window.rootViewController = nav;
     [self.window makeKeyAndVisible];
     return YES;
 }
@@ -45,7 +51,12 @@ didFinishLaunchingWithOptions:(NSDictionary<UIApplicationLaunchOptionsKey, id> *
 
 - (BOOL)handleURL:(NSURL *)url {
     if (!url) return NO;
-    DSHRootVC *root = (DSHRootVC *)self.window.rootViewController;
+    // 根是导航控制器，真正的外壳是它的 rootViewController
+    UIViewController *top = self.window.rootViewController;
+    if ([top isKindOfClass:[UINavigationController class]]) {
+        top = ((UINavigationController *)top).viewControllers.firstObject;
+    }
+    DSHRootVC *root = (DSHRootVC *)top;
     if (![root isKindOfClass:[DSHRootVC class]]) return NO;
 
     // dsh://open?token=xxx  → 可带 token 直接进工作台

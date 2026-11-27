@@ -59,9 +59,9 @@ runProfile({ profile: "desktop", args: ["--no-open", "--host", "127.0.0.1", ...]
 
 | Electron 能力 | iOS 实现 |
 |---|---|
-| `BrowserWindow` + `titleBarStyle: hidden` | `UISplitViewController` |
-| `vibrancy: sidebar` | `secondarySystemBackgroundColor` |
-| 菜单栏（123 处 `Menu`） | `UIMenu`（会话/视图/内核/关于） |
+| `BrowserWindow` + `titleBarStyle: hidden` | 一个全屏 `WKWebView`（导航栏隐藏） |
+| `vibrancy: sidebar` | web UI 自己渲染，原生不掺和 |
+| 菜单栏（123 处 `Menu`） | `UIMenu`（右上角悬浮 ⋯ 按钮：会话/视图/内核/关于） |
 | `dialog.showOpenDialog` | `UIDocumentPickerViewController` + 安全书签 |
 | `shell.openExternal` | `UIApplication.openURL`（scheme 白名单） |
 | `app.getPath` | 路径映射（home/userData/temp/documents…） |
@@ -69,6 +69,23 @@ runProfile({ profile: "desktop", args: ["--no-open", "--host", "127.0.0.1", ...]
 | 语音转文字（sherpa-onnx） | `SFSpeechRecognizer`（见「语音输入」） |
 | 托盘 | ❌ iOS 无此概念 |
 | 自动更新 | ❌ 走 Sileo |
+
+### 外壳为什么这么薄
+
+原生侧**只做 web UI 做不到的事**：
+
+| 原生负责 | 为什么 web UI 做不了 |
+|---|---|
+| 内核进程生命周期 | 内核还没起来时页面根本加载不出来 |
+| 7 个 preload API | 需要 `WKUserContentController` 注入 |
+| agent 浏览器 tab | 需要真的 `WKWebView`（原生里的 iframe） |
+| 语音输入 | `SFSpeechRecognizer` / `AVAudioEngine` |
+| 进程枚举 | `sysctl(KERN_PROC_ALL)` |
+| 启动遮罩 + 保活开关 | 同上，页面不可用 |
+
+其余一律交给 web UI：侧边栏、会话列表、设置页、消息流。
+之前那版用 `UISplitViewController` + `UITableView` 把侧边栏又写了一遍，
+结果是两边不一致、web 前端改版原生侧还要跟着改 —— 已经删掉。
 
 ### Electron preload 的 7 个 API（全部复现）
 

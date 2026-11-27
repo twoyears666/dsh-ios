@@ -16,7 +16,6 @@ typedef NS_ENUM(NSInteger, DSHMenuAction) {
     DSHMenuActionReload,
     DSHMenuActionOpenInSafari,
     DSHMenuActionCopyURL,
-    DSHMenuActionShowSessions,
     DSHMenuActionSettings,
     DSHMenuActionDoctor,
     DSHMenuActionRestartKernel,

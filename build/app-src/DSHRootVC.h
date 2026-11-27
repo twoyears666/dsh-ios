@@ -1,6 +1,6 @@
 //
 //  DSHRootVC.h
-//  桌面端布局：左侧会话栏 + 右侧 WKWebView
+//  外壳根视图：一个全屏 WKWebView（Electron BrowserWindow 的等价物）
 //
 #import <UIKit/UIKit.h>
 #import <WebKit/WebKit.h>

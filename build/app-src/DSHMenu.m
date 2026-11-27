@@ -31,8 +31,9 @@
                                 identifier:nil
                                    options:UIMenuOptionsDisplayInline
                                   children:@[
+        // 会话相关操作全部交给 web UI（它自己就有侧边栏和会话列表），
+        // 原生菜单只留「新会话」这一个常用入口。
         [self action:@"新会话" image:@"plus.bubble" act:DSHMenuActionNewSession disabled:NO],
-        [self action:@"会话列表" image:@"list.bullet" act:DSHMenuActionShowSessions disabled:NO],
     ]];
 
     UIMenu *view = [UIMenu menuWithTitle:@"视图"
