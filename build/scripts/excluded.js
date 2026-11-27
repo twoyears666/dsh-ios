@@ -91,12 +91,15 @@ const DROP_PACKAGES = new Set([
   'node-pty',
 
   // ---- Windows 专属 ----
-  // dsh-win32-process 用 koffi 调 Win32 API（进程/ACL），iOS 完全无关
-  '@deepseek-ai/dsh-win32-process',
-  '@deepseek-ai/dsh-sandbox-windows-acl',
+  //
+  // 注意：下面三个**不能**放进剔除清单，它们由 build/shims/pkg-* 提供 stub：
+  //   @deepseek-ai/dsh-win32-process        ← subprocess-local 顶层静态 import
+  //   @deepseek-ai/dsh-sandbox-windows-acl  ← sandbox-local 顶层静态 import
+  //   @deepseek-ai/dsh-pwsh-local           ← terminal-bash 顶层静态 import
+  // 真机上就是因为缺这三个包，subprocess / sandbox 服务整个起不来，
+  // bash 工具全部不可用。加回清单会被 prune 删掉 stub，又会复现。
   '@deepseek-ai/dsh-tool-pwsh',
   '@deepseek-ai/dsh-tool-pwsh-persistent',
-  '@deepseek-ai/dsh-pwsh-local',
   '@deepseek-ai/dsh-pwsh-sandbox',
   'powershell-utils',
   'wsl-utils',

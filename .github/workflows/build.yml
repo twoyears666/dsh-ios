@@ -193,6 +193,14 @@ jobs:
           # 这样本地 build.sh 和 CI 用同一份规则，不会漂移。
           node build/scripts/prune.js "$NM"
 
+          # prune 之后必须还在：这三个 stub 一旦被删，subprocess/sandbox 服务
+          # 会整个起不来（bash 工具不可用），而且只会在真机上暴露。
+          for p in win32-process sandbox-windows-acl pwsh-local; do
+            [ -d "$NM/@deepseek-ai/dsh-$p" ] \
+              || { echo "❌ stub 被 prune 删掉了: dsh-$p（检查 excluded.js）"; exit 1; }
+          done
+          echo "✓ 3 个平台包 stub 保留"
+
           echo "=== 体积检查 ==="
           du -sh "$NM" 2>/dev/null
           echo "最大文件（>3MB）："
