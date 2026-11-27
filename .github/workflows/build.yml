@@ -117,6 +117,12 @@ jobs:
       - name: 校验 payload 红线
         run: sh build/scripts/verify-payload.sh
 
+      # 静态检查看不出「脚本从头跑到尾会不会中途退出」。
+      # 这一步把 postinst / prerm / preinst 在假越狱根里真的执行一遍，
+      # 断言退出码 0 且关键产物生成（前两次事故都会在这里暴露）。
+      - name: 维护者脚本冒烟测试
+        run: sh build/scripts/smoke-maintainer.sh
+
       - name: 下载 node iOS 运行时
         run: |
           mkdir -p build/work/dl

@@ -260,6 +260,37 @@ CI 里也跑（`build-cli` 的第一步，几秒出结果）。它检查的是**
 2. root/mobile 下对裸 PID `kill` → 误杀系统进程 → 重启 / respring
 3. `set -u` + 未定义变量 → 维护者脚本中途退出 → 又是半配置
 
+### 本地真的跑一遍：`smoke-maintainer.sh`
+
+```sh
+sh build/scripts/smoke-maintainer.sh
+```
+
+静态检查能看出「有没有 `set -e`」，但证明不了「脚本从头跑到尾会不会中途退出」。
+前两次事故恰好都是这一类——真跑一次就立刻暴露。
+
+做法：
+
+1. 造一个假的越狱根（`/var/jb`、`/var/mobile/Media/...` 全用临时目录顶替）
+2. 把 `postinst` / `prerm` / `preinst` 里的绝对路径改写到假根
+3. 给 `launchctl` / `nc` / `uicache` / `ldid` / `pkill` / `plutil` / `sleep` 塞桩，
+   其中 **`launchctl` 和 `nc` 故意返回失败**，模拟真机上「job 没起来、端口没监听」
+4. 执行脚本，断言：
+   - 退出码 **0**（非 0 就等于 dpkg 半配置）
+   - 关键产物真的生成了：`config/installed.version`、`logs/install.log`
+     （证明脚本走到了最后，而不是「早退但恰好返回 0」）
+5. `preinst` 正反两个用例：合规脚本放行、违规脚本拦下并点名每一项
+
+实测：
+
+| 注入 | 冒烟测试 | 静态检查 |
+|---|---|---|
+| `set -u` + 删掉 `LABEL` 定义 | ✗ 退出码 1、install.log 没生成 | ✗ 未定义变量 |
+| `set -e` | ✓（当前脚本已无会失败的命令） | ✗ 出现 set -e |
+| 违规 `postinst` 喂给 `preinst` | ✗ 拦下并点名 4 项 | — |
+
+两者互补：**静态检查管「写法」，冒烟测试管「真的能跑完」**。
+
 ### 两层闸门：构建时 + 装包时
 
 同一个检查做两遍，因为它们挡的是不同来源的包：
