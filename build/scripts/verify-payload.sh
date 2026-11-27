@@ -83,6 +83,14 @@ for f in $(find "$PAYLOAD" -type f \( -name 'postinst' -o -name 'prerm' -o -name
     [ -f "$f" ] || continue
     name=$(printf '%s' "$f" | sed "s|$PAYLOAD/||")
 
+    # 检查器类脚本（preinst）自己就含这些模式字符串，允许显式豁免。
+    # 豁免只跳过「模式匹配」类检查，set -e / exit 0 / shebang 照样查。
+    ALLOW_PATTERNS=0
+    if grep -q 'verify-allow-patterns' "$f" 2>/dev/null; then
+        ALLOW_PATTERNS=1
+        warn "$name: 声明了 verify-allow-patterns（跳过 kill/pkill/nohup 的模式检查）"
+    fi
+
     # --- 2.1 set -e ---
     if [ -n "$(grep_code '^[[:space:]]*set[[:space:]]+-[a-zA-Z]*e' "$f")" ]; then
         fail "$name: 出现了 set -e"
@@ -95,7 +103,7 @@ for f in $(find "$PAYLOAD" -type f \( -name 'postinst' -o -name 'prerm' -o -name
     fi
 
     # --- 2.2 裸 PID kill ---
-    if [ -n "$(grep_code 'kill[[:space:]]+(-[0-9]+[[:space:]]+)?-?"?\$' "$f" | grep -vE 'kill[[:space:]]+-0')" ]; then
+    if [ "$ALLOW_PATTERNS" = "0" ] && [ -n "$(grep_code 'kill[[:space:]]+(-[0-9]+[[:space:]]+)?-?"?\$' "$f" | grep -vE 'kill[[:space:]]+-0')" ]; then
         fail "$name: 对变量（裸 PID）执行 kill"
         printf '      事故 2 就是这么来的：pidfile 过期后 PID 会被系统回收，\n'
         printf '      root 身份一个 kill 就可能命中 SpringBoard/backboardd。\n'
@@ -106,7 +114,7 @@ for f in $(find "$PAYLOAD" -type f \( -name 'postinst' -o -name 'prerm' -o -name
     fi
 
     # --- 2.3 pkill -9 ---
-    if [ -n "$(grep_code 'pkill[[:space:]]+-9' "$f")" ]; then
+    if [ "$ALLOW_PATTERNS" = "0" ] && [ -n "$(grep_code 'pkill[[:space:]]+-9' "$f")" ]; then
         fail "$name: 用了 pkill -9（SIGKILL 不给进程清理机会）"
         grep_code 'pkill[[:space:]]+-9' "$f" | head -3 | while IFS= read -r l; do printf '      %s\n' "$l"; done
     else
@@ -114,7 +122,7 @@ for f in $(find "$PAYLOAD" -type f \( -name 'postinst' -o -name 'prerm' -o -name
     fi
 
     # --- 2.4 nohup ---
-    if [ -n "$(grep_code '(^|[^a-zA-Z_-])nohup([^a-zA-Z_-]|$)' "$f")" ]; then
+    if [ "$ALLOW_PATTERNS" = "0" ] && [ -n "$(grep_code '(^|[^a-zA-Z_-])nohup([^a-zA-Z_-]|$)' "$f")" ]; then
         fail "$name: 用了 nohup（安装过程中拉起重进程）"
         printf '      iOS 上 node 冷启动要 20-60 秒、300MB+，而紧接着 uicache 还会\n'
         printf '      触发 respring。两者叠加在内存紧张的设备上很危险。\n'
@@ -137,6 +145,19 @@ for f in $(find "$PAYLOAD" -type f \( -name 'postinst' -o -name 'prerm' -o -name
         *) fail "$name: shebang 不是 #!/bin/sh（iOS 上可能找不到解释器）" ;;
     esac
 done
+
+# --- 2.7 设备侧闸门必须在 ---
+if [ -f "$PAYLOAD/DEBIAN/preinst" ]; then
+    if [ -x "$PAYLOAD/DEBIAN/preinst" ]; then
+        ok 'DEBIAN/preinst: 存在且可执行（设备侧会拦红线脚本）'
+    else
+        fail 'DEBIAN/preinst 没有执行权限，dpkg 不会运行它'
+    fi
+else
+    fail '缺 DEBIAN/preinst —— 设备侧就没有最后一道闸了'
+    printf '      preinst 在 dpkg 解包前检查即将生效的 postinst/prerm，\n'
+    printf '      发现红线直接中止安装（旧版本保持不动，不会留下半配置）。\n'
+fi
 
 # ---------------------------------------------------------------- 3. 可能失败的命令
 head1 '3. 可能失败的命令（警告，不是红线）'

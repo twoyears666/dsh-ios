@@ -309,6 +309,7 @@ jobs:
           # 不能被覆盖。
           cp -R build/payload/var/. build/root/var/
           mkdir -p build/root/DEBIAN
+          cp build/payload/DEBIAN/preinst  build/root/DEBIAN/preinst
           cp build/payload/DEBIAN/postinst build/root/DEBIAN/postinst
           cp build/payload/DEBIAN/prerm    build/root/DEBIAN/prerm
 
@@ -319,7 +320,8 @@ jobs:
           chmod 755 "$JB/usr/lib/dsh/bin/node" 2>/dev/null || true
           chmod 644 "$JB/etc/dsh/dsh.env" \
                     "$JB/Library/LaunchDaemons/com.twoyears.dsh.plist" 2>/dev/null || true
-          chmod 755 build/root/DEBIAN/postinst build/root/DEBIAN/prerm 2>/dev/null || true
+          chmod 755 build/root/DEBIAN/preinst build/root/DEBIAN/postinst \
+                    build/root/DEBIAN/prerm 2>/dev/null || true
 
           # 原生 App 的可执行位同样会丢
           if [ -f "$JB/Applications/DSH.app/DSH" ]; then

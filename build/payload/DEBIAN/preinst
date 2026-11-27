@@ -1,0 +1,130 @@
+#!/bin/sh
+# preinst —— 装文件之前的最后一道闸
+#
+# 为什么需要它：
+#   事故 1 是 postinst 里的 set -e 把 dpkg 弄成半配置，Sileo 打不开；
+#   事故 2 是维护者脚本以 root 对裸 PID 执行 kill，设备重启。
+#   这两个都是「装完之后才发现」的。preinst 在 **dpkg 解包之前** 执行，
+#   所以可以先把即将生效的 postinst/prerm 检查一遍：
+#   有红线就中止安装 —— dpkg 会在解包前停下，旧版本保持原样，
+#   不会留下半配置状态。
+#
+# 这是设备侧的兜底：不管 deb 是谁构建的（CI、本地、别人给的），
+# 只要它带着本 preinst，装之前都会过这一关。
+#
+# 设计原则：
+#   · 只读，不改任何东西
+#   · 任何检查工具缺失都放行 —— 不能因为「检查不了」就挡住安装
+#   · 只有确认命中红线才 exit 1
+
+# verify-allow-patterns: 本文件是「检查器」本身，里面出现的 pkill -9 / nohup
+# 是用于匹配的字符串，不是真实调用。build/scripts/verify-payload.sh 认这个标记。
+PATH=/var/jb/usr/bin:/var/jb/bin:/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
+
+# DSH_TEST_DPKG_DIR 只给本地测试用（在 Mac 上指向一个假的 info 目录），
+# 设备上永远不会设置它。
+DPKG_DIR=${DSH_TEST_DPKG_DIR:-}
+if [ -z "$DPKG_DIR" ]; then
+    DPKG_DIR=/var/jb/var/lib/dpkg
+    [ -d "$DPKG_DIR" ] || DPKG_DIR=/var/lib/dpkg
+fi
+PKG=com.twoyears.dsh
+LOG=/var/mobile/Media/deepseek-harness/logs/preinst.log
+
+note() {
+    printf '%s\n' "$*"
+    # 日志写不了就关掉，不要让重定向错误刷屏（本地测试时常见）
+    [ -n "$LOG" ] || return 0
+    if ! mkdir -p "$(dirname "$LOG")" 2>/dev/null; then
+        LOG=""
+        return 0
+    fi
+    printf '%s [preinst] %s\n' "$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null)" "$*" \
+        >>"$LOG" 2>/dev/null || LOG=""
+    return 0
+}
+
+# grep 都没有就别检查了，直接放行（宁可放过，不可错杀）
+if ! command -v grep >/dev/null 2>&1; then
+    note "没有 grep，跳过红线检查"
+    exit 0
+fi
+
+# 只取代码行（排除整行注释）—— 注释里提到 nohup/kill 不算违规
+code_of() {
+    grep -vE '^[[:space:]]*#' "$1" 2>/dev/null || true
+}
+
+BAD=0
+REASONS=""
+
+add_bad() {
+    BAD=$((BAD + 1))
+    REASONS="$REASONS  · $1
+"
+    note "红线: $1"
+}
+
+# ---------------------------------------------------------------- 检查一个脚本
+check_script() {
+    f="$1"
+    label="$2"
+    [ -f "$f" ] || return 0
+
+    code=$(code_of "$f")
+
+    # 1) set -e
+    if printf '%s\n' "$code" | grep -qE '^[[:space:]]*set[[:space:]]+-[a-zA-Z]*e'; then
+        add_bad "$label 里有 set -e（任何一条命令失败就会让 dpkg 留下半配置状态）"
+    fi
+
+    # 2) 对裸 PID 发信号（kill -0 是探测，允许）
+    if printf '%s\n' "$code" \
+       | grep -E 'kill[[:space:]]+(-[0-9]+[[:space:]]+)?-?"?\$' \
+       | grep -vE 'kill[[:space:]]+-0' | grep -q .; then
+        add_bad "$label 里对裸 PID 执行 kill（pidfile 过期会误杀系统进程，root 下可能重启设备）"
+    fi
+
+    # 3) pkill -9
+    if printf '%s\n' "$code" | grep -qE 'pkill[[:space:]]+-9'; then
+        add_bad "$label 里用了 pkill -9"
+    fi
+
+    # 4) nohup
+    if printf '%s\n' "$code" | grep -qE '(^|[^a-zA-Z_-])nohup([^a-zA-Z_-]|$)'; then
+        add_bad "$label 里用了 nohup（安装过程中拉起重进程，内存压力下很危险）"
+    fi
+
+    # 5) 结尾必须 exit 0
+    if ! tail -3 "$f" 2>/dev/null | grep -qE '^[[:space:]]*exit[[:space:]]+0'; then
+        add_bad "$label 没有以 exit 0 结束"
+    fi
+}
+
+note "检查即将安装的维护者脚本"
+
+# dpkg 在跑 preinst 之前，已经把新包的 control 脚本解到 info/ 了，
+# 所以这里看到的就是「马上要生效的那一版」。
+check_script "$DPKG_DIR/info/$PKG.postinst" "postinst"
+check_script "$DPKG_DIR/info/$PKG.prerm"    "prerm"
+check_script "$DPKG_DIR/info/$PKG.postrm"   "postrm"
+
+if [ "$BAD" -gt 0 ]; then
+    printf '\n'
+    printf '==============================================\n'
+    printf '  安装已中止：包里的维护者脚本有红线问题\n'
+    printf '==============================================\n'
+    printf '%s' "$REASONS"
+    printf '\n'
+    printf '这些模式在真机上导致过：dpkg 变成半配置（Sileo 打不开）、\n'
+    printf '以及装包时设备重启。为了不让设备再出事，这里直接拦下。\n'
+    printf '\n'
+    printf '处理办法：换一个通过 build/scripts/verify-payload.sh 的包。\n'
+    printf '详细说明: %s\n' "$LOG"
+    printf '\n'
+    exit 1
+fi
+
+note "红线检查通过，继续安装"
+exit 0

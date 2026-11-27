@@ -252,6 +252,33 @@ CI 里也跑（`build-cli` 的第一步，几秒出结果）。它检查的是**
 **这个脚本本身也验证过**：往 payload 里注入 `set -e`、裸 PID `kill`、
 `pkill -9`、`nohup`，五种违规全部被拦下，退出码 1。
 
+### 两层闸门：构建时 + 装包时
+
+同一个检查做两遍，因为它们挡的是不同来源的包：
+
+| 层 | 位置 | 挡谁 |
+|---|---|---|
+| 构建时 | `build/scripts/verify-payload.sh`（CI 第一步） | 自己改出来的回归 |
+| **装包时** | `DEBIAN/preinst`（设备上，dpkg 解包**之前**） | **任何来源的包**，包括别人给的、手工拼的 |
+
+`preinst` 在 dpkg 解包前执行，这时新包的 `postinst` / `prerm` 已经被解到
+`/var/jb/var/lib/dpkg/info/` 了 —— 也就是说它检查的正是**马上要生效的那一版**。
+命中红线就 `exit 1`，dpkg 在解包前中止，**旧版本保持原样，不会留下半配置状态**。
+
+所以哪怕有人塞一个带 `set -e` 或裸 PID `kill` 的 deb 进来，只要它带着
+本 `preinst`，装之前就会被拦下。
+
+设计上刻意保守：
+
+- 只读，不改任何东西
+- 没有 `grep` 就跳过检查、直接放行 —— 宁可放过，不可错杀
+- 只有确认命中红线才 `exit 1`
+- 日志写不了就关掉，不影响判定
+
+`preinst` 自己含 `pkill -9` / `nohup` 这些**模式字符串**，会被构建时的
+`verify-payload.sh` 误判，所以它声明了 `verify-allow-patterns` 豁免标记；
+豁免只跳过模式匹配类检查，`set -e` / `exit 0` / shebang 照样查。
+
 ### 别用 `launchctl disable`
 
 `dsh-ctl stop` / `disable` 以前会调 `launchctl disable system/com.twoyears.dsh`，
