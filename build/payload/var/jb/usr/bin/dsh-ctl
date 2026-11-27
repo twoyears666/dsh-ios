@@ -23,6 +23,9 @@ ROOT=/var/mobile/Media/deepseek-harness
 LABEL=com.twoyears.dsh
 PLIST="$JB/Library/LaunchDaemons/$LABEL.plist"
 FLAG="$ROOT/config/keepalive.disabled"
+# 「我要内核跑」的意愿文件。监督进程 dsh-supervise 循环读它和 FLAG：
+#   有 WANT → 起；没 WANT 但保活没关 → 起；否则停。
+WANT="$ROOT/config/kernel.want"
 PIDFILE="$ROOT/config/kernel.pid"
 LOG="$ROOT/logs/ctl.log"
 
@@ -161,6 +164,8 @@ cmd_start() {
     fi
 
     logline "start"
+    mkdir -p "$(dirname "$WANT")"
+    : >"$WANT" 2>/dev/null || true
     # 1) 已注册：kickstart 最干净
     if launchd_loaded; then
         launchctl kickstart "system/$LABEL" 2>/dev/null && { say "已启动（launchd）"; return 0; }
@@ -190,6 +195,8 @@ cmd_start() {
 
 cmd_stop() {
     logline "stop"
+    # 清掉「我要内核跑」，否则 dsh-supervise 会马上又把它拉起来
+    rm -f "$WANT" 2>/dev/null || true
     # 先关保活，否则 launchd 会立刻拉起
     if [ ! -f "$FLAG" ]; then
         mkdir -p "$(dirname "$FLAG")"
@@ -295,6 +302,8 @@ cmd_restart() {
 cmd_enable() {
     logline "enable"
     rm -f "$FLAG" 2>/dev/null || true
+    mkdir -p "$(dirname "$WANT")"
+    : >"$WANT" 2>/dev/null || true
     launchctl enable "system/$LABEL" 2>/dev/null || true
     say "保活已开启：开机自启 + 崩溃自动拉起"
 

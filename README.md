@@ -176,6 +176,56 @@ dsh-ctl browser on|off|status   # agent 浏览器权限
 - `restart` —— 重启，**会恢复**原来的保活状态
 - `clear` —— 关保活 + 杀进程 + **不会**恢复保活；专治「旧版本内核占着 3080」
 
+### 内核由谁拉起：`dsh-supervise`
+
+真机日志证明了一件很关键的事：**App 进程不允许 exec 任何外部程序**。
+
+```
+access("/var/jb/usr/bin/dsh", X_OK) → 成功
+posix_spawn("/var/jb/usr/bin/dsh")  → rc=2 ENOENT
+access("/bin/launchctl", X_OK)      → 失败
+```
+
+也就是说「文件存在、可执行」和「能 exec」是两回事。所以 App 里
+起内核、调 `dsh-ctl`、跑 `dsh-doctor`、读 `node --version` 全部失败。
+
+于是把「谁负责起内核」交给 launchd：
+
+```
+launchd
+  └─ dsh-supervise（死循环，长期驻留）
+       └─ dsh web --no-open --port 3080
+```
+
+App 只用两种**不需要 exec** 的手段控制它：
+
+| 手段 | 用在哪 |
+|---|---|
+| 标记文件 | `config/kernel.want` / `config/keepalive.disabled` |
+| 信号 | 读 `config/kernel.pid`，`kill(pid, SIGTERM)` → `SIGKILL` |
+
+判定逻辑（监督脚本里）：
+
+| `kernel.want` | `keepalive.disabled` | 结果 |
+|---|---|---|
+| 有 | 任意 | 起（用户显式要求） |
+| 无 | 无 | 起（开机自启） |
+| 无 | 有 | 停 |
+
+对应到 App 的操作：
+
+| 操作 | 动作 |
+|---|---|
+| 打开 App | 写 `kernel.want` |
+| 启动内核 | 写 `kernel.want` |
+| 停止 / 清除进程 | 删 `kernel.want` + 写 `keepalive.disabled` + 杀 pid |
+| 重启 | 写 `kernel.want` + 杀 pid（监督进程自动拉起新的） |
+| 开启保活 | 删 `keepalive.disabled` + 写 `kernel.want` |
+| 关闭保活 | 写 `keepalive.disabled`（内核继续跑） |
+
+「运行自检」也不再调 `dsh-doctor`（exec 不了），改成原生自检：
+越狱环境 + 版本 + pidfile + `sysctl` 进程列表。
+
 ### 回环免 token
 
 内核原本对**所有**请求都要 token：访问 `/` 不带 token 直接 401。

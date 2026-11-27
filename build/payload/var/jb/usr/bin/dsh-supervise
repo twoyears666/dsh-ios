@@ -1,0 +1,106 @@
+#!/bin/sh
+# dsh-supervise —— 内核监督进程（由 launchd 拉起，长期驻留）
+#
+# 为什么需要它：
+#   真机日志证明 App 进程**不允许 exec 任何外部程序** ——
+#   access("/var/jb/usr/bin/dsh", X_OK) 返回成功，但 posix_spawn 一律
+#   ENOENT（连 /bin/launchctl 都不可执行）。所以 App 既起不了内核，
+#   也调不了 dsh-ctl。
+#
+#   于是把「谁负责起内核」交给 launchd：launchd 拉起本脚本，本脚本循环看守。
+#   App 只用两种不需要 exec 的手段控制它：
+#     1) 写/删标记文件
+#     2) 对 pidfile 里的 pid 发信号（App 和内核同为 mobile，有权 kill）
+#
+# 两个标记，语义分开：
+#   config/kernel.want          我要内核跑（App 打开时写、点「启动」时写）
+#   config/keepalive.disabled   开机别自启（点「关闭保活」「清除进程」时写）
+#
+# 判定：
+#   有 want            → 起（用户显式要求，保活关也照起）
+#   没 want 但保活没关 → 起（开机自启）
+#   没 want 且保活关   → 停
+#
+set -u
+
+JB=/var/jb
+ROOT=/var/mobile/Media/deepseek-harness
+WANT="$ROOT/config/kernel.want"
+FLAG="$ROOT/config/keepalive.disabled"
+PIDFILE="$ROOT/config/kernel.pid"
+LOG="$ROOT/logs/supervise.log"
+
+mkdir -p "$ROOT/config" "$ROOT/logs" 2>/dev/null || true
+
+say() { printf '%s [supervise] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >>"$LOG" 2>/dev/null || true; }
+
+PORT=3080
+if [ -f "$JB/etc/dsh/dsh.env" ]; then
+    p=$(sed -n 's/.*DSH_WEB_PORT:=\([0-9]*\).*/\1/p' "$JB/etc/dsh/dsh.env" | head -1)
+    [ -n "${p:-}" ] && PORT="$p"
+fi
+
+port_up() { nc -z 127.0.0.1 "$PORT" 2>/dev/null; }
+
+should_run() {
+    [ -f "$WANT" ] && return 0
+    [ -f "$FLAG" ] && return 1
+    return 0
+}
+
+kill_kernel() {
+    [ -f "$PIDFILE" ] || return 0
+    _p=$(sed -n '1p' "$PIDFILE" 2>/dev/null)
+    case "$_p" in
+        ''|*[!0-9]*) rm -f "$PIDFILE" 2>/dev/null; return 0 ;;
+    esac
+    if kill -0 "$_p" 2>/dev/null; then
+        say "停止内核 pid=$_p"
+        kill "$_p" 2>/dev/null || true
+        _i=0
+        while [ "$_i" -lt 6 ]; do
+            kill -0 "$_p" 2>/dev/null || break
+            sleep 1
+            _i=$((_i + 1))
+        done
+        kill -9 "$_p" 2>/dev/null || true
+    fi
+    rm -f "$PIDFILE" 2>/dev/null || true
+    return 0
+}
+
+say "启动（端口 $PORT）"
+BACKOFF=2
+
+while :; do
+    if ! should_run; then
+        kill_kernel
+        sleep 2
+        continue
+    fi
+
+    if port_up; then
+        # 已经有内核在跑（例如上一轮没杀干净），等它自己结束
+        sleep 3
+        continue
+    fi
+
+    say "拉起内核"
+    START=$(date '+%s')
+    "$JB/usr/bin/dsh" web --no-open --port "$PORT" >>"$ROOT/logs/web.log" 2>&1
+    RC=$?
+    RUNTIME=$(( $(date '+%s') - START ))
+    say "内核退出 rc=$RC 运行 ${RUNTIME}s"
+
+    # 跑够 60 秒说明是正常退出/被用户停掉，重置退避
+    if [ "$RUNTIME" -ge 60 ]; then
+        BACKOFF=2
+    else
+        BACKOFF=$((BACKOFF * 2))
+        [ "$BACKOFF" -gt 30 ] && BACKOFF=30
+    fi
+
+    # 用户要求停就别等退避，立刻进停止分支
+    should_run || continue
+    sleep "$BACKOFF"
+done

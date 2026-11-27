@@ -27,6 +27,18 @@ NS_ASSUME_NONNULL_BEGIN
 /// 人类可读的进程报告，直接丢给 UIAlertController 显示。
 + (NSString *)dshProcessReport;
 
+#pragma mark - 内核控制（不依赖 exec）
+
+// App 在真机上不允许 exec 任何外部程序（posix_spawn 一律 ENOENT），
+// 所以控制内核只能靠「标记文件 + 信号」。这两个是信号那一半。
+
+/// 从 pidfile 读内核 pid，读不到返回 0。
++ (pid_t)kernelPid;
+
+/// 停内核：SIGTERM → 等 → SIGKILL。返回 YES 表示确认已退出。
+/// 只对同 uid 的进程有效 —— 内核由 launchd 以 mobile 身份启动，App 也是 mobile。
++ (BOOL)stopKernelWait:(NSTimeInterval)seconds;
+
 @end
 
 NS_ASSUME_NONNULL_END

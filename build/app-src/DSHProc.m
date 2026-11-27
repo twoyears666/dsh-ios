@@ -130,4 +130,47 @@ static NSString *DSHExecutablePath(pid_t pid) {
     return s;
 }
 
+#pragma mark - 内核控制
+
+static NSString *const kKernelPidFile = @"/var/mobile/Media/deepseek-harness/config/kernel.pid";
+
++ (pid_t)kernelPid {
+    NSString *raw = [NSString stringWithContentsOfFile:kKernelPidFile
+                                              encoding:NSUTF8StringEncoding
+                                                 error:NULL];
+    if (raw.length == 0) return 0;
+    long pid = strtol(raw.UTF8String, NULL, 10);
+    return (pid > 0 && pid < 1000000) ? (pid_t)pid : 0;
+}
+
++ (BOOL)stopKernelWait:(NSTimeInterval)seconds {
+    pid_t pid = [self kernelPid];
+    if (pid <= 0) {
+        // 没有 pidfile 也可能是内核在跑（旧版本没写），交给调用方用端口判断
+        return YES;
+    }
+    if (kill(pid, 0) != 0) {
+        // 已经不在
+        [[NSFileManager defaultManager] removeItemAtPath:kKernelPidFile error:NULL];
+        return YES;
+    }
+
+    kill(pid, SIGTERM);
+
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:seconds];
+    while ([deadline timeIntervalSinceNow] > 0) {
+        if (kill(pid, 0) != 0) {
+            [[NSFileManager defaultManager] removeItemAtPath:kKernelPidFile error:NULL];
+            return YES;
+        }
+        usleep(200 * 1000);
+    }
+
+    kill(pid, SIGKILL);
+    usleep(500 * 1000);
+    BOOL gone = (kill(pid, 0) != 0);
+    if (gone) [[NSFileManager defaultManager] removeItemAtPath:kKernelPidFile error:NULL];
+    return gone;
+}
+
 @end

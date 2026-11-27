@@ -514,68 +514,26 @@ static void DSHAppLog(NSString *fmt, ...) {
 
 /// 确保 dsh 内核在跑：先探测，没跑就通过 launchctl 拉起。
 - (void)ensureKernelRunning {
-    NSURLComponents *c = [NSURLComponents componentsWithString:self.baseURL];
-    NSString *host = c.host ?: @"127.0.0.1";
-    NSInteger port = c.port.integerValue ?: 3080;
+    // 真机日志已经证明：App 进程不允许 exec 任何外部程序 ——
+    // access("/var/jb/usr/bin/dsh", X_OK) 成功，posix_spawn 却一律 ENOENT
+    // （连 /bin/launchctl 都不可执行）。所以这里不再尝试自己起内核，
+    // 只负责「表达意愿」：写 config/kernel.want，
+    // 由 launchd 拉起的 dsh-supervise 去实际执行。
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *configDir = @"/var/mobile/Media/deepseek-harness/config";
+    NSString *wantPath = [configDir stringByAppendingPathComponent:@"kernel.want"];
 
-    __weak typeof(self) weakSelf = self;
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        if (DSHProbeKernel(host, port)) return;   // 已在跑
-
-        // 端口还没起来，但可能已经有人（launchd）在启动了。
-        // 这时候再 spawn 一个就是两个内核抢一个端口，必须只等不抢。
-        if (DSHKernelStarting()) {
-            DSHAppLog(@"内核已在启动中（pidfile 有活进程），等待其就绪");
-            return;
-        }
-
-        // 直接脱离启动，不依赖 launchctl。
-        //
-        // 为什么不用 launchctl：
-        //   - App 沙箱里 launchctl 常被拒（即使有 no-sandbox entitlement）
-        //   - bootstrap/kickstart 都需要和 launchd 通信，权限模型复杂
-        //
-        // 用 posix_spawn + SETSID：新会话，脱离 App 进程组，
-        // App 挂起/退后台不会带走内核。
-        // 用独立文件，避免和 dsh 自己写的 web.log 冲突
-        // （dsh 会先清空 web.log，App 的 fd 偏移会错位）
-        NSString *logPath = @"/var/mobile/Media/deepseek-harness/logs/app-spawn.log";
-        pid_t pid = 0;
-        // 关键：必须显式传环境变量。
-        // iOS App 的 PATH 只有 /usr/bin:/bin:/usr/sbin:/sbin，
-        // 不含 /var/jb/usr/bin。dsh 脚本里的 mkdir/tail/nc 会全部 ENOENT，
-        // 导致日志写不出来、内核起不来。
-        NSDictionary *env = @{
-            @"PATH": @"/var/jb/usr/bin:/var/jb/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-            @"HOME": @"/var/mobile",
-            @"DSH_ROOT": @"/var/mobile/Media/deepseek-harness",
-            @"DSH_HOME": @"/var/mobile/Media/deepseek-harness/data",
-            @"DSH_LOG_DIR": @"/var/mobile/Media/deepseek-harness/logs",
-            @"TMPDIR": @"/var/mobile/Media/deepseek-harness/cache/tmp",
-            @"LANG": @"en_US.UTF-8",
-        };
-        NSString *dsh = self.dshPath ?: @"/var/jb/usr/bin/dsh";
-        int rc = [DSHShell spawnDetached:dsh
-                                    args:@[@"web", @"--no-open",
-                                           @"--port", [NSString stringWithFormat:@"%ld", (long)port]]
-                                 logPath:logPath
-                                     env:env
-                                     pid:&pid];
-
-        DSHAppLog(@"spawnDetached rc=%d pid=%d log=%@", rc, pid, logPath);
-
-        // 无论成败都交给探测循环接手（可能 launchd 那边已经在跑）
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            __strong typeof(weakSelf) self = weakSelf;
-            if (self) [self probeKernelOnce];
-        });
-    });
+    if (DSHKernelStarting()) {
+        DSHAppLog(@"内核进程已在运行（pidfile 有活进程），不重复请求");
+        return;
+    }
+    [fm createDirectoryAtPath:configDir withIntermediateDirectories:YES attributes:nil error:NULL];
+    if (![fm fileExistsAtPath:wantPath]) {
+        [fm createFileAtPath:wantPath contents:[NSData data] attributes:nil];
+        DSHAppLog(@"写入 kernel.want，等监督进程拉起内核");
+    }
 }
 
-/// 单次探测。用方法递归代替 block 自引用 —— 原来把 block 存进局部变量
-/// 再让内层 block 捕获，方法返回后 block 已释放，dispatch_after 收到 NULL，
-/// libdispatch 直接 SIGTRAP（"NULL was passed where a block should have been"）。
 - (void)probeKernelOnce {
     NSURLComponents *c = [NSURLComponents componentsWithString:self.baseURL];
     NSString *host = c.host ?: @"127.0.0.1";
@@ -1359,38 +1317,28 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
 
 /// 运行 dsh-doctor 并把结果展示出来
 - (void)runDoctor {
-    if (self.doctorPath.length == 0) {
-        // App 进程看不到 /var/jb 时 dsh-doctor 根本起不来，别弹一个空框
-        __weak typeof(self) weakSelf = self;
-        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-            NSString *report = [weakSelf nativeSelfCheckReport];
-            dispatch_async(dispatch_get_main_queue(), ^{
-                UIAlertController *a = [UIAlertController
-                    alertControllerWithTitle:@"自检（原生）"
-                                     message:report
-                              preferredStyle:UIAlertControllerStyleAlert];
-                [a addAction:[UIAlertAction actionWithTitle:@"好"
-                                                     style:UIAlertActionStyleCancel
-                                                   handler:nil]];
-                [weakSelf presentViewController:a animated:YES completion:nil];
-            });
+    // 一律走原生自检。
+    //
+    // 以前会去跑 dsh-doctor，但真机上 App 不允许 exec（posix_spawn 一律
+    // ENOENT），跑不起来的；而 access() 又返回成功，所以「有没有这个文件」
+    // 判断不出能不能执行。干脆不试，直接用 sysctl + 文件读出一条等价信息。
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSString *report = [weakSelf nativeSelfCheckReport];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) self = weakSelf;
+            if (!self) return;
+            DSHAppLog(@"自检:\n%@", report);
+            UIAlertController *a = [UIAlertController
+                alertControllerWithTitle:@"自检（原生）"
+                                 message:report
+                          preferredStyle:UIAlertControllerStyleAlert];
+            [a addAction:[UIAlertAction actionWithTitle:@"好"
+                                                 style:UIAlertActionStyleCancel
+                                               handler:nil]];
+            [self presentViewController:a animated:YES completion:nil];
         });
-        return;
-    }
-
-    [DSHShell runAsync:(self.doctorPath ?: @"/var/jb/usr/bin/dsh-doctor")
-                  args:nil
-               timeout:30
-            completion:^(NSString *output, int status) {
-        NSString *text = output.length ? output : @"(无输出)";
-        if (text.length > 2000) text = [text substringToIndex:2000];
-        UIAlertController *a = [UIAlertController
-            alertControllerWithTitle:@"dsh-doctor"
-                             message:text
-                      preferredStyle:UIAlertControllerStyleAlert];
-        [a addAction:[UIAlertAction actionWithTitle:@"关闭" style:UIAlertActionStyleCancel handler:nil]];
-        [self presentViewController:a animated:YES completion:nil];
-    }];
+    });
 }
 
 #pragma mark - 语音输入
@@ -1480,29 +1428,71 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
 
 /// 调用 dsh-ctl 子命令，完成后刷新状态
 - (void)ctl:(NSString *)subcommand message:(NSString *)message {
+    // 真机上 dsh-ctl 也 exec 不了，内核控制全部改成
+    // 「标记文件 + 信号」两件事，不再调外部命令。
+    //
+    //   kernel.want           我要内核跑
+    //   keepalive.disabled    开机别自启
+    //
+    // dsh-supervise 由 launchd 拉起，循环读这两个标记：
+    //   有 want → 起；没 want 但保活没关 → 起；否则停。
+    DSHAppLog(@"ctl %@", subcommand);
     [self toast:message];
+
+    NSString *configDir = @"/var/mobile/Media/deepseek-harness/config";
+    NSString *wantPath  = [configDir stringByAppendingPathComponent:@"kernel.want"];
+    NSString *flagPath  = [configDir stringByAppendingPathComponent:@"keepalive.disabled"];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    [fm createDirectoryAtPath:configDir withIntermediateDirectories:YES attributes:nil error:NULL];
+
     __weak typeof(self) weakSelf = self;
-    [DSHShell runAsync:(self.ctlPath ?: @"/var/jb/usr/bin/dsh-ctl")
-                  args:@[subcommand]
-               timeout:30
-            completion:^(NSString *output, int status) {
-        __strong typeof(weakSelf) self = weakSelf;
-        if (!self) return;
-        DSHAppLog(@"dsh-ctl %@ → status=%d %@", subcommand, status,
-                  [output stringByTrimmingCharactersInSet:
-                   [NSCharacterSet whitespaceAndNewlineCharacterSet]]);
-        [self toast:output.length > 0 ? output : [NSString stringWithFormat:@"dsh-ctl %@ 完成", subcommand]];
-        // 状态可能变了，等内核起稳再刷新
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            [weakSelf refreshMenu];
-            weakSelf.keepAliveSwitch.on = [weakSelf keepAliveEnabled];
-            [weakSelf probeKernelOnce];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSString *result = nil;
+
+        if ([subcommand isEqualToString:@"enable"]) {
+            [fm removeItemAtPath:flagPath error:NULL];
+            [fm createFileAtPath:wantPath contents:[NSData data] attributes:nil];
+            result = @"保活已开启";
+        } else if ([subcommand isEqualToString:@"disable"]) {
+            [fm createFileAtPath:flagPath contents:[NSData data] attributes:nil];
+            result = @"保活已关闭（内核继续运行，重启设备后不自启）";
+        } else if ([subcommand isEqualToString:@"start"]) {
+            [fm createFileAtPath:wantPath contents:[NSData data] attributes:nil];
+            result = @"已请求启动，监督进程几秒内拉起内核";
+        } else if ([subcommand isEqualToString:@"stop"] || [subcommand isEqualToString:@"clear"]) {
+            [fm removeItemAtPath:wantPath error:NULL];
+            [fm createFileAtPath:flagPath contents:[NSData data] attributes:nil];
+            BOOL gone = [DSHProc stopKernelWait:6];
+            result = gone ? @"内核已停止，保活已关闭"
+                          : @"已发出停止请求，但内核还没退出（可以再试一次）";
+        } else if ([subcommand isEqualToString:@"restart"]) {
+            [fm createFileAtPath:wantPath contents:[NSData data] attributes:nil];
+            [DSHProc stopKernelWait:6];
+            result = @"已重启，监督进程几秒内拉起新内核";
+        }
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) self = weakSelf;
+            if (!self) return;
+            DSHAppLog(@"ctl %@ → %@", subcommand, result ?: @"(无结果)");
+            [self toast:result ?: @"完成"];
+            [self refreshMenu];
+            self.keepAliveSwitch.on = [self keepAliveEnabled];
+
+            BOOL wantUp = [subcommand isEqualToString:@"start"]
+                       || [subcommand isEqualToString:@"restart"]
+                       || [subcommand isEqualToString:@"enable"];
+            if (wantUp) {
+                // 监督进程拉起内核要几秒，等一会儿再探测
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)),
+                               dispatch_get_main_queue(), ^{
+                    [weakSelf probeKernelOnce];
+                });
+            }
         });
-    }];
+    });
 }
 
-/// 停止内核前确认（避免误触把正在跑的任务中断）
 - (void)confirmStopKernel {
     UIAlertController *a = [UIAlertController
         alertControllerWithTitle:@"停止内核"
@@ -1546,17 +1536,9 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
 
 /// 重启 dsh 内核（launchctl kickstart）
 - (void)restartKernel {
-    [DSHShell runAsync:@"/bin/sh"
-                  args:@[@"-c",
-        @"launchctl kickstart -k system/com.twoyears.dsh 2>&1 || "
-        @"(launchctl unload /var/jb/Library/LaunchDaemons/com.twoyears.dsh.plist; "
-        @"launchctl load /var/jb/Library/LaunchDaemons/com.twoyears.dsh.plist)"]
-               timeout:15
-            completion:^(NSString *output, int status) {
-        [self toast:status == 0 ? @"内核已重启" : [NSString stringWithFormat:@"重启返回 %d", status]];
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{ [self loadWorkbench]; });
-    }];
+    // 以前这里走 /bin/sh -c "launchctl kickstart ..."，真机上 exec 被拒，
+    // 等于点了没反应。现在交给监督进程：写 want + 杀内核，它会重新拉起。
+    [self ctl:@"restart" message:@"正在重启内核…"];
 }
 
 @end

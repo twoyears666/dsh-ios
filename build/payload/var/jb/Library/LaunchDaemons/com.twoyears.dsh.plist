@@ -4,22 +4,22 @@
 <dict>
     <key>Label</key>
     <string>com.twoyears.dsh</string>
+    <!--
+      由监督脚本而不是直接由 dsh 承载：
+      App 进程在真机上不允许 exec 任何外部程序（posix_spawn 一律 ENOENT），
+      所以内核只能由 launchd 这边拉起。App 通过「标记文件 + 信号」控制，
+      两种手段都不需要 exec。
+    -->
     <key>ProgramArguments</key>
     <array>
-        <string>/var/jb/usr/bin/dsh</string>
-        <string>web</string>
-        <string>--no-open</string>
-        <string>--port</string>
-        <string>3080</string>
+        <string>/var/jb/usr/bin/dsh-supervise</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
     <!--
-      保活策略：只在「异常退出」时拉起，正常停止不复活。
-      用 SuccessfulExit=false 而不是无条件 true：
-        - 崩溃 / 被信号杀死 → 拉起
-        - 正常退出（exit 0，例如 dsh-ctl stop 触发）→ 不拉起
-      用户彻底关闭用 dsh-ctl stop（会 bootout 卸载，根本不触发本规则）。
+      监督脚本自己就是死循环，正常情况下不会退出；
+      这一条只兜「监督脚本本身崩了」的情况。
+      用 SuccessfulExit=false：崩溃拉起，正常退出（bootout）不复活。
     -->
     <key>KeepAlive</key>
     <dict>
