@@ -134,6 +134,7 @@ dsh-ctl status                  # 运行中 / 保活 / launchd / URL / 版本 / 
 dsh-ctl start                   # 启动
 dsh-ctl stop                    # 停止（同时关保活）
 dsh-ctl clear                   # 强制清除进程（关保活 + 杀干净 + 等端口释放）
+dsh-ctl ps                      # 看内核进程（pidfile / 端口 / launchd）
 dsh-ctl restart                 # 重启（不改变保活设置）
 dsh-ctl enable                  # 开启后台保活
 dsh-ctl disable                 # 关闭保活
@@ -147,6 +148,7 @@ dsh-ctl browser on|off|status   # agent 浏览器权限
 | 右上角菜单 → 内核 | 启动 / 停止 / 重启 | 常规控制 |
 | 右上角菜单 → 内核 | **清除进程** | 关保活 + 杀光内核进程，用于「升级后旧内核还占着端口」 |
 | 右上角菜单 → 内核 | 运行自检 | 跑 `dsh-doctor` |
+| 右上角菜单 → 内核 | **进程列表** | `sysctl` 原生枚举，不依赖 `ps` |
 | 加载界面 | 后台保活 开关 | 只控制后台保活 |
 | 加载界面 | **清除进程** 按钮 | 同菜单项 |
 
@@ -156,6 +158,33 @@ dsh-ctl browser on|off|status   # agent 浏览器权限
 - `disable` —— 只关保活，不动正在跑的进程
 - `restart` —— 重启，**会恢复**原来的保活状态
 - `clear` —— 关保活 + 杀进程 + **不会**恢复保活；专治「旧版本内核占着 3080」
+
+### 回环免 token
+
+内核原本对**所有**请求都要 token：访问 `/` 不带 token 直接 401。
+移植版的 App 就是同一台设备上的 WKWebView 外壳，回环上再套一层 token 只有坏处：
+
+- App 每次要去 `web.log` 里正则抓 token，旧日志 / 多实例时会抓错
+- 抓不到就 401，界面卡在「未启动」，而且很难看出是认证问题
+- 用户自己 `curl 127.0.0.1:3080` 调试也被挡住
+
+所以 `patch-ios.js` 里加了两个补丁，把 `@deepseek-ai/dsh-client-connection`
+的两处鉴权入口对回环放行：
+
+| 位置 | 作用 |
+|---|---|
+| `authorizeIndex()` | 页面本身（`/`） |
+| `admit()` | `/api` 与 socket 升级 |
+
+判据是 `req.socket.remoteAddress`，**不看 Host 头**（Host 可以伪造）。
+放行范围只有 `127.0.0.1` / `::1` / `::ffff:127.0.0.1`。
+
+App 侧相应改成**先不带 token 加载**；只有在响应决策阶段真的收到 401
+（说明跑的是没打补丁的旧内核）才回退到抓 token 的老流程。
+
+⚠️ 安全边界：这意味着**设备上任何进程**都能不带认证访问 `127.0.0.1:3080`，
+包括其它 App 和越狱插件。这是「回环免 token」本身的性质，
+只在单人自用的越狱设备上成立；不要把这个 deb 装到别人也能用的机器上。
 
 ### 升级时自动停掉旧内核
 

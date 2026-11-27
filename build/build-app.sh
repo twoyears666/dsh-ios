@@ -78,6 +78,7 @@ SOURCES=(
     "$SRC/DSHBrowserBridge.m"
     "$SRC/DSHBrowserControl.m"
     "$SRC/DSHVoice.m"
+    "$SRC/DSHProc.m"
 )
 
 for f in "${SOURCES[@]}"; do

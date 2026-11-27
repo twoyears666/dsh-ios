@@ -108,6 +108,47 @@ PATCHES.push({
   check: 'esm',
 });
 
+// ---------------------------------------------------------------- 6. 回环免 token
+// 移植版的 App 就是本机的 WKWebView 外壳，浏览器和内核在同一台设备上。
+// token 的本意是防「远程」访问，回环上再套一层 token 只有坏处：
+//   - App 每次要去 web.log 里正则抓 token，旧日志/多实例时会抓错
+//   - 抓不到就 401，界面卡在「未启动」，很难查
+//   - 用户自己 curl 127.0.0.1:3080 调试也被挡住
+//
+// 内核里鉴权只有两个入口，两处都放行回环即可：
+//   authorizeIndex()  —— 页面本身
+//   admit()           —— /api 与 socket 升级
+// 判据用 socket 的 remoteAddress，不看 Host 头（Host 可以伪造）。
+PATCHES.push({
+  name: '回环访问免 token（页面）',
+  file: '@deepseek-ai/dsh-client-connection/lib/index.js',
+  old: `\tauthorizeIndex(req, res, secure = false) {
+\t\t/* v8 ignore next -- node:http always supplies url on server requests. */`,
+  new: `\tauthorizeIndex(req, res, secure = false) {
+\t\t// dsh-iOS: 回环免 token。移植版是本机 WebView 外壳，
+\t\t// token 只对远程访问有意义；回环上再要 token 只会让 App 抓 token 失败。
+\t\tconst _ra = req.socket?.remoteAddress;
+\t\tif (_ra === "127.0.0.1" || _ra === "::1" || _ra === "::ffff:127.0.0.1") return true;
+\t\t/* v8 ignore next -- node:http always supplies url on server requests. */`,
+  marker: 'dsh-iOS: 回环免 token。移植版是本机 WebView 外壳',
+  check: 'esm',
+});
+
+PATCHES.push({
+  name: '回环访问免 token（/api）',
+  file: '@deepseek-ai/dsh-client-connection/lib/index.js',
+  old: `\t\tif (this.disposed) return { rejection: 401 };
+\t\tconst secure = this.owner.get("webServer")?.protocol === "https:";`,
+  new: `\t\tif (this.disposed) return { rejection: 401 };
+\t\t// dsh-iOS: 回环免 token（与 authorizeIndex 同一判据）。
+\t\t// 返回 browserPeer，等价于「浏览器带着有效 cookie 进来了」。
+\t\tconst _ra = request.socket?.remoteAddress;
+\t\tif (_ra === "127.0.0.1" || _ra === "::1" || _ra === "::ffff:127.0.0.1") return { peer: this.browserPeer };
+\t\tconst secure = this.owner.get("webServer")?.protocol === "https:";`,
+  marker: 'dsh-iOS: 回环免 token（与 authorizeIndex 同一判据）',
+  check: 'esm',
+});
+
 // ---------------------------------------------------------------- 执行
 let ok = 0, skipped = 0, failed = 0;
 

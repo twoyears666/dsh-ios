@@ -18,6 +18,7 @@
 #import "DSHBrowserBridge.h"
 #import "DSHBrowserControl.h"
 #import "DSHVoice.h"
+#import "DSHProc.h"
 
 // POSIX socket：用于内核存活探测（DSHProbeKernel）
 #import <sys/socket.h>
@@ -209,6 +210,9 @@ static void DSHAppLog(NSString *fmt, ...) {
 @property (nonatomic, strong) UISwitch *keepAliveSwitch;
 @property (nonatomic, strong) UILabel *keepAliveLabel;
 @property (nonatomic, strong) UIButton *clearProcessButton;
+/// 已经因为 401 回退到「抓 token」流程了。
+/// 内核打过回环免 token 补丁时永远是 NO，token 那套逻辑根本不会跑。
+@property (nonatomic, assign) BOOL retriedWithToken;
 @property (nonatomic, strong) UIView *loadingOverlay;
 
 @property (nonatomic, strong) NSMutableArray<NSDictionary *> *sessions;
@@ -640,6 +644,17 @@ static void DSHAppLog(NSString *fmt, ...) {
     [self.spinner startAnimating];
     self.statusLabel.text = @"正在加载…";
 
+    // 回环免 token：内核已经对 127.0.0.1 放行（见 patch-ios.js 的两个补丁），
+    // 所以默认直接加载，不再去 web.log 里正则抓 token。
+    // 抓 token 那套很容易出错：旧日志、多实例、转义、时序都可能抓错，
+    // 抓错就 401，界面卡在「未启动」很难查。
+    // 只有内核版本旧、真的 401 时才回退（见 decidePolicyForNavigationResponse）。
+    if (!self.retriedWithToken) {
+        DSHAppLog(@"加载工作台（回环免 token）");
+        [self loadWithToken:nil];
+        return;
+    }
+
     // token 优先级：显式属性 > dsh.env > 内核日志
     // 读日志可能涉及较大文件，放后台队列，避免阻塞主线程。
     NSString *explicitToken = self.authToken ?: DSHEnvValue(@"DSH_WEB_TOKEN");
@@ -724,6 +739,28 @@ static void DSHAppLog(NSString *fmt, ...) {
 }
 
 #pragma mark - WKNavigationDelegate
+
+/// 401 回退：内核没打回环补丁（或者被别的实例挡住）时才会走到这里。
+/// 401 是「正常响应 + 一段文字」，不会触发 didFailProvisionalNavigation，
+/// 只能在响应决策阶段拦下来。
+- (void)webView:(WKWebView *)webView
+    decidePolicyForNavigationResponse:(WKNavigationResponse *)navigationResponse
+                      decisionHandler:(void (^)(WKNavigationResponsePolicy))decisionHandler {
+    if (navigationResponse.isForMainFrame &&
+        [navigationResponse.response isKindOfClass:[NSHTTPURLResponse class]]) {
+        NSInteger code = ((NSHTTPURLResponse *)navigationResponse.response).statusCode;
+        if (code == 401 && !self.retriedWithToken) {
+            self.retriedWithToken = YES;
+            DSHAppLog(@"回环被 401 拒绝（内核没打免 token 补丁？），回退到抓 token");
+            decisionHandler(WKNavigationResponsePolicyCancel);
+            // 取消是异步生效的，等这一轮导航收尾再重新加载，
+            // 否则新请求可能被同一个取消逻辑吞掉。
+            dispatch_async(dispatch_get_main_queue(), ^{ [self loadWorkbench]; });
+            return;
+        }
+    }
+    decisionHandler(WKNavigationResponsePolicyAllow);
+}
 
 - (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
     self.authRetryCount = 0;   // 成功则重置
@@ -1255,6 +1292,22 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
         case DSHMenuActionClearProcess:
             [self confirmClearProcess];
             break;
+
+        case DSHMenuActionProcessList: {
+            // 设备上没有 ps/pgrep，这里走 sysctl 原生枚举。
+            // 同时写进 app.log，事后也能翻。
+            NSString *report = [DSHProc dshProcessReport];
+            DSHAppLog(@"进程列表:\n%@", report);
+            UIAlertController *a = [UIAlertController
+                alertControllerWithTitle:@"进程列表"
+                                 message:report
+                          preferredStyle:UIAlertControllerStyleAlert];
+            [a addAction:[UIAlertAction actionWithTitle:@"好"
+                                                 style:UIAlertActionStyleCancel
+                                               handler:nil]];
+            [self presentViewController:a animated:YES completion:nil];
+            break;
+        }
 
         case DSHMenuActionVoice:
             [self startVoiceInput];

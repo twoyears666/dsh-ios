@@ -66,6 +66,8 @@
         [self action:@"运行自检" image:@"stethoscope" act:DSHMenuActionDoctor disabled:NO],
         // 清除进程：比「停止内核」更狠，用于旧版本内核占着端口的情况
         [self action:@"清除进程" image:@"xmark.bin" act:DSHMenuActionClearProcess disabled:NO],
+        // 进程列表：设备上没有 ps，走 sysctl 原生枚举
+        [self action:@"进程列表" image:@"list.bullet.rectangle" act:DSHMenuActionProcessList disabled:NO],
         [self action:@"设置" image:@"gearshape" act:DSHMenuActionSettings disabled:NO],
     ]];
 

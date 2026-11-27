@@ -6,6 +6,7 @@
 #   dsh-ctl start       启动内核
 #   dsh-ctl stop        停止内核（并关掉保活，防止被拉起）
 #   dsh-ctl clear       强制清除内核进程（关保活 + 杀进程 + 等端口释放）
+#   dsh-ctl ps          看内核进程（pidfile / 端口 / launchd，有 ps 就列全表）
 #   dsh-ctl restart     重启内核
 #   dsh-ctl enable      开启保活（开机自启 + 崩溃自动拉起）
 #   dsh-ctl disable     关闭保活（不阻止手动启动）
@@ -96,6 +97,59 @@ cmd_status() {
     if [ -f "$ROOT/logs/app.log" ]; then
         _a=$(grep -o 'App 启动.*' "$ROOT/logs/app.log" 2>/dev/null | tail -1)
         [ -n "$_a" ] && say "  外壳:    $_a"
+    fi
+    return 0
+}
+
+# 查进程。
+#
+# 设备上默认没有 ps / pgrep / procps，所以这里只能：
+#   1) 读 pidfile 判断内核活着没（launcher 写入，最准）
+#   2) nc -z 探端口（看有没有别的东西占着）
+#   3) 查 launchd 注册状态
+# 有 ps 就顺手列一遍，没有就提示用户去 App 里看原生枚举。
+cmd_ps() {
+    say "=== dsh 进程 ==="
+
+    if [ -f "$PIDFILE" ]; then
+        _p=$(sed -n '1p' "$PIDFILE" 2>/dev/null)
+        case "$_p" in
+            ''|*[!0-9]*)
+                say "  内核:    pidfile 内容无效（$_p）"
+                ;;
+            *)
+                if kill -0 "$_p" 2>/dev/null; then
+                    say "  内核:    运行中（pid $_p）"
+                else
+                    say "  内核:    已退出（pid $_p 是旧记录）"
+                fi
+                ;;
+        esac
+    else
+        say "  内核:    没有 pidfile"
+    fi
+
+    if is_running; then
+        say "  端口:    $(port) 在监听"
+    else
+        say "  端口:    $(port) 未监听"
+    fi
+
+    if launchd_loaded; then
+        say "  launchd: 已注册"
+    else
+        say "  launchd: 未注册"
+    fi
+
+    if command -v ps >/dev/null 2>&1; then
+        say ""
+        say "=== 系统进程（过滤 dsh / node）==="
+        ps -A 2>/dev/null | grep -E 'dsh|node' | grep -v grep | sed -n '1,20p'
+    else
+        say ""
+        say "系统里没有 ps（越狱机默认不带 procps）。"
+        say "  看全部进程：apt install procps 之后再来"
+        say "  或者用 App：菜单 → 内核 → 进程列表（原生枚举，不依赖 ps）"
     fi
     return 0
 }
@@ -300,6 +354,7 @@ case "${1:-status}" in
     start)   cmd_start ;;
     stop)    cmd_stop ;;
     clear)   cmd_clear ;;
+    ps)      cmd_ps ;;
     restart) cmd_restart ;;
     enable)  cmd_enable ;;
     disable) cmd_disable ;;
