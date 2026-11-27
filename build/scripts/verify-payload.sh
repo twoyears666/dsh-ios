@@ -159,6 +159,38 @@ else
     printf '      发现红线直接中止安装（旧版本保持不动，不会留下半配置）。\n'
 fi
 
+# ---------------------------------------------------------------- 2.8 运行期脚本
+# 维护者脚本查过了，但 dsh / dsh-ctl / dsh-supervise 这些**运行期脚本**也会
+# 以 root 或 mobile 身份 kill 进程，同样的误杀风险。
+# dsh-supervise 就以 mobile 跑，而 SpringBoard 也是 mobile —— 误杀就是 respring。
+head1 '2.8 运行期脚本：裸 PID kill'
+for f in $(find "$PAYLOAD/var/jb/usr/bin" -type f 2>/dev/null); do
+    [ -f "$f" ] || continue
+    case "$(head -1 "$f" 2>/dev/null)" in
+        '#!'*sh*) ;;
+        *) continue ;;
+    esac
+    name=$(basename "$f")
+
+    # 脚本自己起的子进程（VAR=$!）允许 kill —— 那是它自己的 tail / node
+    CHILD_VARS=$(grep -oE '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=\$!' "$f" 2>/dev/null \
+                 | sed 's/^[[:space:]]*//; s/=\$!$//' | sort -u)
+
+    BAD_KILL=0
+    for var in $(grep_code 'kill[[:space:]]+(-[0-9]+[[:space:]]+)?-?"?\$' "$f" \
+                 | grep -vE 'kill[[:space:]]+-0' \
+                 | sed -n 's/.*"\$\([A-Za-z_][A-Za-z0-9_]*\)".*/\1/p' | sort -u); do
+        if printf '%s\n' "$CHILD_VARS" | grep -qx "$var"; then
+            continue   # 自己的子进程
+        fi
+        BAD_KILL=1
+        fail "$name: 对 \$$var 执行 kill，但它不是脚本自己的子进程（\$!）"
+        printf '      pidfile 里的 PID 可能是过期的，PID 回收后会指向别的进程。\n'
+        printf '      改用 pkill -f + 本移植版的完整安装路径。\n'
+    done
+    [ "$BAD_KILL" = "0" ] && ok "$name: 没有对非子进程的裸 PID kill"
+done
+
 # ---------------------------------------------------------------- 3. 可能失败的命令
 head1 '3. 可能失败的命令（警告，不是红线）'
 for f in $(find "$PAYLOAD" -type f \( -name 'postinst' -o -name 'prerm' \) 2>/dev/null); do

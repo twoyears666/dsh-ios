@@ -245,6 +245,7 @@ CI 里也跑（`build-cli` 的第一步，几秒出结果）。它检查的是**
 | shebang 必须是 `#!/bin/sh` | iOS 上可能找不到解释器 |
 | plist 的启动目标必须存在且可执行 | 否则 launchd 静默不启动 |
 | `var/jb/usr/bin/*` 必须有执行位 | 否则装上去 EACCES |
+| **运行期脚本**也不许裸 PID `kill`（`dsh-supervise` 以 mobile 跑，SpringBoard 也是 mobile） | 误杀 = respring |
 
 另外还有两类提示（不阻塞）：维护者脚本里可能失败又没兜底的命令、
 `control` 文件里出现 Debian 不支持的 `#` 注释。

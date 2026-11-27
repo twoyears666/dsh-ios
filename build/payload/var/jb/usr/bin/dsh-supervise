@@ -30,6 +30,10 @@ FLAG="$ROOT/config/keepalive.disabled"
 PIDFILE="$ROOT/config/kernel.pid"
 LOG="$ROOT/logs/supervise.log"
 
+# 只按 argv 模式认「我们自己这一份」内核，不用 pidfile 里的裸 PID。
+KERNEL_ARGV="$JB/usr/lib/dsh/node_modules/@deepseek-ai/dsh/lib/bin.js"
+LAUNCHER_ARGV="$JB/usr/bin/dsh web"
+
 mkdir -p "$ROOT/config" "$ROOT/logs" 2>/dev/null || true
 
 say() { printf '%s [supervise] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >>"$LOG" 2>/dev/null || true; }
@@ -49,22 +53,16 @@ should_run() {
 }
 
 kill_kernel() {
-    [ -f "$PIDFILE" ] || return 0
-    _p=$(sed -n '1p' "$PIDFILE" 2>/dev/null)
-    case "$_p" in
-        ''|*[!0-9]*) rm -f "$PIDFILE" 2>/dev/null; return 0 ;;
-    esac
-    if kill -0 "$_p" 2>/dev/null; then
-        say "停止内核 pid=$_p"
-        kill "$_p" 2>/dev/null || true
-        _i=0
-        while [ "$_i" -lt 6 ]; do
-            kill -0 "$_p" 2>/dev/null || break
-            sleep 1
-            _i=$((_i + 1))
-        done
-        kill -9 "$_p" 2>/dev/null || true
-    fi
+    # 不对 pidfile 里的裸 PID 发信号。
+    #
+    # 本脚本以 mobile 身份运行（plist 里 UserName=mobile），而 SpringBoard
+    # 也是 mobile —— pidfile 过期、PID 被回收后误杀，就是一次 respring。
+    # 维护者脚本里同样的模式在 root 下更严重（可能直接重启设备），
+    # 这里必须一起改掉。
+    #
+    # 只按 argv 模式杀：模式里带本移植版的完整安装路径，不会误伤。
+    pkill -f "$KERNEL_ARGV" 2>/dev/null || true
+    pkill -f "$LAUNCHER_ARGV" 2>/dev/null || true
     rm -f "$PIDFILE" 2>/dev/null || true
     return 0
 }
