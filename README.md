@@ -355,7 +355,21 @@ App 侧复刻了 launcher 的全部行为：
 2. `/bin/sh -c "exec node ..."`
 3. `/bin/sh <launcher> web ...`（原来的方式，兜底）
 
-launchd 的 plist 保留着（现在无害），`dsh-supervise` 也保留给终端用户用。
+**launchd 相关的东西全部移除了**：plist、`dsh-supervise`、postinst 里的注册代码。
+理由：launchd 在这台设备上注册成功但从不 spawn，留着只会变成隐患 ——
+万一将来它恢复工作，就会和 App 抢同一个端口。postinst 现在反过来
+`bootout` + 删除残留 plist。
+
+由此带来的两个必然结论：
+
+| | 结论 |
+|---|---|
+| 开机自启 | **不可能**。重启后必须先打开 App，内核才会起来 |
+| 命令行启动 | **不可能**。`dsh-ctl start` 只会提示「请打开 App」 |
+| 后台保活 | 含义变成「App 退到后台时内核是否继续跑」：<br>开（默认）= 继续跑；关 = 退后台时停掉 |
+
+「继续跑」是天然的：`posix_spawn` 带 `POSIX_SPAWN_SETSID`，内核已脱离 App 的进程组，
+不会被一起挂起。
 
 ### launchd 要用 `/bin/sh` 跑脚本
 

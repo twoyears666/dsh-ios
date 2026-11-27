@@ -273,7 +273,14 @@ done
 head1 '4. launchd plist'
 PLISTS=$(find "$PAYLOAD" -type f -name '*.plist' 2>/dev/null)
 if [ -z "$PLISTS" ]; then
-    warn '没找到 plist'
+    # 内核改由 App 直接拉起之后，就不再需要 launchd plist 了。
+    # 但要确认 postinst 会把老版本残留的 plist 清掉，否则将来 launchd
+    # 万一恢复，会和 App 抢同一个端口。
+    if grep -q 'rm -f "$PLIST"' "$PAYLOAD/DEBIAN/postinst" 2>/dev/null; then
+        ok '没有 launchd plist（内核由 App 拉起），且 postinst 会清理残留'
+    else
+        warn '没有 launchd plist，但 postinst 里没看到清理残留的语句'
+    fi
 else
     for p in $PLISTS; do
         name=$(printf '%s' "$p" | sed "s|$PAYLOAD/||")

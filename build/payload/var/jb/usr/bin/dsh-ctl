@@ -164,32 +164,15 @@ cmd_start() {
     fi
 
     logline "start"
-    mkdir -p "$(dirname "$WANT")"
-    : >"$WANT" 2>/dev/null || true
-    # 1) 已注册：kickstart 最干净
-    if launchd_loaded; then
-        launchctl kickstart "system/$LABEL" 2>/dev/null && { say "已启动（launchd）"; return 0; }
-    fi
-    # 2) 未注册：bootstrap
-    if [ -f "$PLIST" ]; then
-        launchctl bootstrap system "$PLIST" 2>/dev/null \
-            || launchctl load -w "$PLIST" 2>/dev/null
-        if launchd_loaded; then
-            say "已启动（launchd bootstrap）"
-            return 0
-        fi
-    fi
-    # 3) launchd 不可用：直接后台起
-    if [ -x "$JB/usr/bin/dsh" ]; then
-        mkdir -p "$ROOT/logs"
-        (nohup "$JB/usr/bin/dsh" web --no-open --port "$(port)" >>"$ROOT/logs/web.log" 2>&1 &)
-        sleep 2
-        if is_running; then
-            say "已启动（后台进程，无 launchd 守护）"
-            return 0
-        fi
-    fi
-    say "启动失败，看日志：$ROOT/logs/web.log" >&2
+
+    # 内核只能由 App 拉起。
+    #
+    # launchd 在这台设备上不会 spawn 我们的 job（active count 恒为 0、
+    # supervise.log 从未生成），改成 /bin/sh 包一层也没用。
+    # 而命令行这边也不该用 nohup 直接起 —— 那是 root 身份起 300MB 的 node，
+    # 和 App 自己起的实例会抢同一个端口。
+    say "内核由 App 拉起：请打开 DeepSeek Harness。"
+    say "（命令行无法启动内核，这是当前设备的限制）"
     return 1
 }
 

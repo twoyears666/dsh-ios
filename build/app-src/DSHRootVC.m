@@ -278,6 +278,7 @@ static void DSHAppLog(NSString *fmt, ...) {
 - (NSArray<NSString *> *)tierArgsForName:(NSString *)name;
 - (NSDictionary<NSString *, NSString *> *)kernelEnvironment;
 - (void)recordKernelPid:(pid_t)pid;
+- (void)observeAppLifecycle;
 - (void)handleProbeResult:(BOOL)up;
 - (void)loadWithToken:(nullable NSString *)token;
 - (nullable NSString *)scrapeTokenFromLog;
@@ -342,10 +343,49 @@ static void DSHAppLog(NSString *fmt, ...) {
 
     [self buildLayout];
     [self observeBridgeReplies];
+    [self observeAppLifecycle];
     [self probeExecutables];
     [self startKernelWatch];
 }
 
+
+/// 前后台切换。
+///
+/// 内核由 App 拉起（launchd 那条路在这台设备上不通），所以「后台保活」
+/// 只能表达一件事：**App 退到后台时，内核要不要继续跑**。
+///   · 保活开（默认）→ 退后台什么都不做，内核继续跑（POSIX_SPAWN_SETSID
+///     已经让它脱离了 App 的进程组，不会被一起挂起）
+///   · 保活关 → 退后台时把内核停掉，省内存和电
+- (void)observeAppLifecycle {
+    __weak typeof(self) weakSelf = self;
+    NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
+
+    [nc addObserverForName:UIApplicationDidEnterBackgroundNotification
+                    object:nil queue:[NSOperationQueue mainQueue]
+                usingBlock:^(NSNotification *note) {
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self) return;
+        if ([self keepAliveEnabled]) {
+            DSHAppLog(@"退后台：保活开，内核继续运行");
+            return;
+        }
+        DSHAppLog(@"退后台：保活关，停止内核");
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            BOOL gone = [DSHProc stopKernelWait:3];
+            DSHAppLog(@"  停内核 %@", gone ? @"成功" : @"失败（可能没有内核在跑）");
+        });
+    }];
+
+    [nc addObserverForName:UIApplicationWillEnterForegroundNotification
+                    object:nil queue:[NSOperationQueue mainQueue]
+                usingBlock:^(NSNotification *note) {
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self) return;
+        DSHAppLog(@"回前台：检查内核");
+        [self ensureKernelRunning];
+        [self probeKernelOnce];
+    }];
+}
 
 /// DSHBridge 通过通知把 JS 回注请求转过来（避免 bridge 直接持有 webView）
 - (void)observeBridgeReplies {
@@ -1678,10 +1718,10 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
         if ([subcommand isEqualToString:@"enable"]) {
             [fm removeItemAtPath:flagPath error:NULL];
             [fm createFileAtPath:wantPath contents:[NSData data] attributes:nil];
-            result = @"保活已开启";
+            result = @"保活已开启：App 退到后台后内核继续运行";
         } else if ([subcommand isEqualToString:@"disable"]) {
             [fm createFileAtPath:flagPath contents:[NSData data] attributes:nil];
-            result = @"保活已关闭（内核继续运行，重启设备后不自启）";
+            result = @"保活已关闭：App 退到后台时会停止内核";
         } else if ([subcommand isEqualToString:@"start"]) {
             [fm createFileAtPath:wantPath contents:[NSData data] attributes:nil];
             result = @"已请求启动，监督进程几秒内拉起内核";

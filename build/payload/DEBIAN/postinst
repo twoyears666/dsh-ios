@@ -160,82 +160,32 @@ if [ -f "$D/VERSION" ]; then
     cp "$D/VERSION" "$ROOT/config/installed.version" 2>/dev/null || true
 fi
 
-# 5.3 重新注册（clear 会把 launchd 置为 disabled，这里恢复默认自启）
+# 5.3 清掉 launchd job
 #
-# 真机上出现过「装完内核不跑、supervise.log 压根不存在」的情况：
-# launchd 根本没接住这个 job，而失败被 || true 吞掉了，什么都没留下。
-# 所以这里改成：注册 → 打印诊断 → 没起来就自己兜底拉起，全程写 install.log。
+# 内核现在**只能由 App 拉起**。真机 install.log 证明 launchd 在这台设备上
+# 不会 spawn 我们的 job（active count 一直 0、state 停在 spawn scheduled、
+# supervise.log 从未生成），改成 /bin/sh 包一层也没用。
+#
+# 所以这里不注册，反而要主动卸掉：
+#   · 万一将来 launchd 恢复，它会和 App 抢同一个端口
+#   · 残留的 plist 会被 launchd 扫进 user/501 域，白占一个"spawn scheduled"
 INSTALL_LOG="$ROOT/logs/install.log"
 mkdir -p "$ROOT/logs" 2>/dev/null || true
 
-install_diag() {
-    # 注意：postinst 顶部是 set -e，而这里每一条都是「可能失败」的诊断命令
-    # （文件不存在、grep 没匹配、launchctl 报错都很正常）。
-    # 任何一条返回非 0 都会让整个 postinst 失败 → dpkg 留下半配置状态 →
-    # Sileo 再也调不动 dpkg。真机上就是这么把 dpkg 弄坏的。
-    # 所以这里**每一条都 || true**，并且整体再兜一层。
-    {
-        echo "=== $(date '+%Y-%m-%d %H:%M:%S') $1 ==="
-        echo "--- plist ---"
-        ls -l "$PLIST" 2>&1 || true
-        plutil -lint "$PLIST" 2>&1 || true
-        echo "--- launchctl print system/$LABEL ---"
-        launchctl print "system/$LABEL" 2>&1 | head -25 || true
-        echo "--- disabled 覆盖 ---"
-        launchctl print-disabled system 2>&1 | grep -i "$LABEL" 2>&1 || echo "(未在禁用表中)"
-        echo "--- 端口 3080 ---"
-        if nc -z 127.0.0.1 3080 2>/dev/null; then echo "在监听"; else echo "未监听"; fi
-        echo "--- supervise.log 尾部 ---"
-        if [ -f "$ROOT/logs/supervise.log" ]; then
-            tail -15 "$ROOT/logs/supervise.log" 2>&1 || true
-        else
-            echo "(不存在)"
-        fi
-        echo
-    } >>"$INSTALL_LOG" 2>&1 || true
-    return 0
-}
-
-if [ -f "$PLIST" ]; then
-    launchctl enable "system/$LABEL" 2>/dev/null || true
-    rm -f "$ROOT/config/keepalive.disabled" 2>/dev/null || true
-    # 清掉「我要内核跑」以外的历史状态；want 由 App 自己写
-    launchctl bootout "system/$LABEL" 2>/dev/null || true
-    launchctl bootout system "$PLIST" 2>/dev/null || true
-    sleep 1
-
-    # 依次尝试三种注册方式，哪种成就停
-    # -F 是关键：强制加载，忽略 launchd 的 disabled 覆盖表。
-    # 老版本留下的 disable 记录只能靠它绕过（bootstrap 会被直接拒）。
-    launchctl bootstrap system "$PLIST" 2>>"$INSTALL_LOG" \
-        || launchctl load -w -F "$PLIST" 2>>"$INSTALL_LOG" \
-        || launchctl load -w "$PLIST" 2>>"$INSTALL_LOG" \
-        || launchctl kickstart "system/$LABEL" 2>>"$INSTALL_LOG" \
-        || true
-    sleep 3
-
-    install_diag "注册完成"
-
-    # 这里**不再**用 nohup 兜底起 node。
-    #
-    # 上一版这么干过：安装过程中以 root 拉起 node（iOS 上 300MB+、
-    # 冷启动 20-60 秒），而紧接着 uicache 还会触发 respring。
-    # 两者叠加在内存紧张的设备上很危险，真机上装包时设备重启过一次。
-    # 宁可这次装完内核没起来（用户能看到日志），也不要冒这个风险。
-    if ! nc -z 127.0.0.1 3080 2>/dev/null; then
-        echo "$(date '+%Y-%m-%d %H:%M:%S') 警告：launchd 未拉起内核，请打开 App 查看 install.log" \
-            >>"$INSTALL_LOG"
+{
+    echo "=== $(date '+%Y-%m-%d %H:%M:%S') 清理 launchd ==="
+    echo "内核由 App 拉起，launchd 不参与"
+    launchctl bootout "system/$LABEL" 2>&1 || true
+    launchctl bootout "user/501/$LABEL" 2>&1 || true
+    launchctl bootout system "$PLIST" 2>&1 || true
+    if [ -f "$PLIST" ]; then
+        rm -f "$PLIST" && echo "已删除残留 plist: $PLIST"
+    else
+        echo "没有残留 plist"
     fi
-fi
+    echo "--- 端口 3080 ---"
+    if nc -z 127.0.0.1 3080 2>/dev/null; then echo "在监听（可能是旧内核）"; else echo "未监听"; fi
+    echo
+} >>"$INSTALL_LOG" 2>&1 || true
 
-# ---------------------------------------------------------------- 6. 提示
-echo ""
-echo "数据目录: $ROOT"
-echo "  工作区: $ROOT/workspaces   ← 新建的项目放这里"
-echo "  配置:   $ROOT/config"
-echo "  日志:   $ROOT/logs"
-echo ""
-echo "  URL:    dsh-url"
-echo "  自检:   dsh-doctor"
-echo ""
 exit 0
