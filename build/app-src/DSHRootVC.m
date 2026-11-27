@@ -232,6 +232,13 @@ static void DSHAppLog(NSString *fmt, ...) {
 /// 悬浮菜单按钮。导航栏隐藏（web 页面要真正全屏），用它代替右上角的 ⋯。
 @property (nonatomic, strong) UIButton *menuButton;
 
+// 越狱根下的工具路径。真机上 /var/jb/... 从 App 进程里可能解析不到
+// （posix_spawn 直接 ENOENT），所以启动时按候选解析一次，全部走这里。
+@property (nonatomic, copy, nullable) NSString *dshPath;
+@property (nonatomic, copy, nullable) NSString *ctlPath;
+@property (nonatomic, copy, nullable) NSString *doctorPath;
+@property (nonatomic, copy, nullable) NSString *nodePath;
+
 /// 已经因为 401 回退到「抓 token」流程了。
 /// 内核打过回环免 token 补丁时永远是 NO，token 那套逻辑根本不会跑。
 @property (nonatomic, assign) BOOL retriedWithToken;
@@ -308,6 +315,17 @@ static void DSHAppLog(NSString *fmt, ...) {
     }
 
     self.view.backgroundColor = [UIColor systemBackgroundColor];
+
+    // 先探路径再干别的：真机上 App 进程可能根本看不到 /var/jb。
+    // 这段输出是排查「spawn rc=2 ENOENT」的唯一线索。
+    DSHAppLog(@"=== 越狱环境 ===\n%@", [DSHShell jailbreakEnvironmentReport]);
+    NSMutableString *diag = [NSMutableString string];
+    self.dshPath    = [DSHShell resolveJailbreakPath:@"usr/bin/dsh"        diagnostics:diag];
+    self.ctlPath    = [DSHShell resolveJailbreakPath:@"usr/bin/dsh-ctl"    diagnostics:diag];
+    self.doctorPath = [DSHShell resolveJailbreakPath:@"usr/bin/dsh-doctor" diagnostics:diag];
+    self.nodePath   = [DSHShell resolveJailbreakPath:@"usr/lib/dsh/bin/node" diagnostics:diag];
+    DSHAppLog(@"=== 工具解析 ===\n%@", diag);
+    DSHAppLog(@"选中 dsh=%@ ctl=%@ node=%@", self.dshPath, self.ctlPath, self.nodePath);
 
     self.menu = [[DSHMenu alloc] init];
     self.menu.delegate = self;
@@ -536,7 +554,8 @@ static void DSHAppLog(NSString *fmt, ...) {
             @"TMPDIR": @"/var/mobile/Media/deepseek-harness/cache/tmp",
             @"LANG": @"en_US.UTF-8",
         };
-        int rc = [DSHShell spawnDetached:@"/var/jb/usr/bin/dsh"
+        NSString *dsh = self.dshPath ?: @"/var/jb/usr/bin/dsh";
+        int rc = [DSHShell spawnDetached:dsh
                                     args:@[@"web", @"--no-open",
                                            @"--port", [NSString stringWithFormat:@"%ld", (long)port]]
                                  logPath:logPath
@@ -1285,7 +1304,7 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     static NSString *cached = nil;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        NSString *out = [DSHShell run:@"/var/jb/usr/lib/dsh/bin/node"
+        NSString *out = [DSHShell run:(self.nodePath ?: @"/var/jb/usr/lib/dsh/bin/node")
                                   args:@[@"--version"]
                                timeout:5];
         out = [out stringByTrimmingCharactersInSet:
@@ -1316,9 +1335,50 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
                    dispatch_get_main_queue(), ^{ [a dismissViewControllerAnimated:YES completion:nil]; });
 }
 
+/// 原生自检：设备上跑不了 dsh-doctor 时（App 看不到 /var/jb）用它兜底。
+/// 内容就是排查「内核为什么没起来」需要的那几项。
+- (NSString *)nativeSelfCheckReport {
+    NSMutableString *s = [NSMutableString string];
+    [s appendString:@"=== 越狱环境 ===\n"];
+    [s appendString:[DSHShell jailbreakEnvironmentReport]];
+
+    [s appendFormat:@"\n=== 版本 ===\n  外壳 %@\n  内核 %@\n",
+        [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?",
+        [self installedKernelVersion] ?: @"(未知)"];
+
+    NSString *pidRaw = [NSString stringWithContentsOfFile:
+        @"/var/mobile/Media/deepseek-harness/config/kernel.pid"
+                                                encoding:NSUTF8StringEncoding error:NULL];
+    [s appendFormat:@"\n=== pidfile ===\n  %@\n",
+        pidRaw.length ? [pidRaw stringByTrimmingCharactersInSet:
+                         [NSCharacterSet whitespaceAndNewlineCharacterSet]] : @"(无)"];
+
+    [s appendFormat:@"\n=== 进程 ===\n%@\n", [DSHProc dshProcessReport]];
+    return s;
+}
+
 /// 运行 dsh-doctor 并把结果展示出来
 - (void)runDoctor {
-    [DSHShell runAsync:@"/var/jb/usr/bin/dsh-doctor"
+    if (self.doctorPath.length == 0) {
+        // App 进程看不到 /var/jb 时 dsh-doctor 根本起不来，别弹一个空框
+        __weak typeof(self) weakSelf = self;
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            NSString *report = [weakSelf nativeSelfCheckReport];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                UIAlertController *a = [UIAlertController
+                    alertControllerWithTitle:@"自检（原生）"
+                                     message:report
+                              preferredStyle:UIAlertControllerStyleAlert];
+                [a addAction:[UIAlertAction actionWithTitle:@"好"
+                                                     style:UIAlertActionStyleCancel
+                                                   handler:nil]];
+                [weakSelf presentViewController:a animated:YES completion:nil];
+            });
+        });
+        return;
+    }
+
+    [DSHShell runAsync:(self.doctorPath ?: @"/var/jb/usr/bin/dsh-doctor")
                   args:nil
                timeout:30
             completion:^(NSString *output, int status) {
@@ -1422,7 +1482,7 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
 - (void)ctl:(NSString *)subcommand message:(NSString *)message {
     [self toast:message];
     __weak typeof(self) weakSelf = self;
-    [DSHShell runAsync:@"/var/jb/usr/bin/dsh-ctl"
+    [DSHShell runAsync:(self.ctlPath ?: @"/var/jb/usr/bin/dsh-ctl")
                   args:@[subcommand]
                timeout:30
             completion:^(NSString *output, int status) {

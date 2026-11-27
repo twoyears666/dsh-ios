@@ -48,6 +48,20 @@ NS_ASSUME_NONNULL_BEGIN
          timeout:(NSTimeInterval)timeout
       completion:(void (^)(NSString *output, int status))completion;
 
+/// 越狱根候选（按优先级）：/var/jb，以及从自身 bundle 反推出来的真实 preboot 路径。
+/// iOS App 有沙盒扩展，通常只对自己 bundle 有特权；
+/// /var/jb 是指向 /private/preboot/... 的符号链接，某些设备上 App 进程
+/// 解析不到（posix_spawn 直接返回 ENOENT）。所以要能换条路走。
++ (NSArray<NSString *> *)jailbreakRootCandidates;
+
+/// 在越狱根候选下找 relative（如 "usr/bin/dsh"），找到返回绝对路径。
+/// @param diagnostics 非空时把每个候选的探测结果追加进去，便于写日志排查。
++ (nullable NSString *)resolveJailbreakPath:(NSString *)relative
+                                diagnostics:(NSMutableString *_Nullable)diagnostics;
+
+/// /var/jb 的解析情况、bundle 路径、launchctl 是否可用 —— 一行行文本，直接进 app.log。
++ (NSString *)jailbreakEnvironmentReport;
+
 @end
 
 NS_ASSUME_NONNULL_END

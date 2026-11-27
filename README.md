@@ -421,6 +421,25 @@ cat /var/mobile/Media/deepseek-harness/logs/app-spawn.log
 cat /var/mobile/Media/deepseek-harness/logs/app.log
 ```
 
+### `spawn rc=2` / `posix_spawn 失败 (2): No such file or directory`
+
+真机上出现过：App 里点任何需要执行命令的功能（启动内核、清除进程、自检、
+关于页的 Node 版本）全部失败，而内核本身跑得好好的（launchd 起的）。
+
+原因：iOS 给 App 的沙盒扩展通常只覆盖它自己的 bundle。
+`/var/jb` 是指向 `/private/preboot/<hash>/.../procursus` 的符号链接，
+**App 进程解析不到这条链接**，`access()` / `posix_spawn()` 直接 ENOENT；
+而 launchd（root）和 postinst（root）都能正常解析。
+
+所以现在：
+- 启动时把 `/var/jb`、bundle 路径、`/bin/launchctl` 以及
+  `usr/bin/dsh`、`usr/bin/dsh-ctl`、`usr/lib/dsh/bin/node` 的探测结果
+  全部写进 `app.log`（`=== 越狱环境 ===` / `=== 工具解析 ===`）
+- 工具路径按候选解析：`/var/jb/<rel>`，再从自身 bundle 反推
+  `<root>/Applications/DSH.app` → `<root>/<rel>`
+- `dsh-doctor` 起不来时，「运行自检」自动退化成**原生自检**
+  （越狱环境 + 版本 + pidfile + 进程列表），不会弹空框
+
 ### 更新了但没生效（还是旧界面 / 日志不刷新）
 
 典型症状：Sileo 显示已装新版本，但 App 打开还是老样子，

@@ -12,6 +12,57 @@ extern char **environ;
 
 @implementation DSHShell
 
+#pragma mark - 路径解析
+
++ (NSArray<NSString *> *)jailbreakRootCandidates {
+    NSMutableArray<NSString *> *roots = [NSMutableArray arrayWithObject:@"/var/jb"];
+    // 从自己的 bundle 反推越狱根：<root>/Applications/DSH.app
+    NSString *bundle = [[NSBundle mainBundle] bundlePath];
+    if (bundle.length > 0) {
+        NSString *root = [[bundle stringByDeletingLastPathComponent] stringByDeletingLastPathComponent];
+        if (root.length > 1 && ![roots containsObject:root]) [roots addObject:root];
+    }
+    return roots;
+}
+
++ (NSString *)resolveJailbreakPath:(NSString *)relative diagnostics:(NSMutableString *)diag {
+    for (NSString *root in [self jailbreakRootCandidates]) {
+        NSString *path = [root stringByAppendingPathComponent:relative];
+        errno = 0;
+        BOOL ok = access(path.fileSystemRepresentation, X_OK) == 0;
+        int err = ok ? 0 : errno;
+        if (diag) {
+            // 别拼临时字符串的 UTF8String（会悬空）
+            if (ok) [diag appendFormat:@"  %@ → 可用\n", path];
+            else    [diag appendFormat:@"  %@ → 不可用 (errno %d)\n", path, err];
+        }
+        if (ok) return path;
+    }
+    return nil;
+}
+
++ (NSString *)jailbreakEnvironmentReport {
+    NSMutableString *s = [NSMutableString string];
+
+    char buf[PATH_MAX] = {0};
+    ssize_t n = readlink("/var/jb", buf, sizeof(buf) - 1);
+    if (n > 0) {
+        buf[n] = 0;
+        [s appendFormat:@"  /var/jb → %s\n", buf];
+    } else {
+        [s appendFormat:@"  /var/jb 不是符号链接（errno=%d）\n", errno];
+    }
+    [s appendFormat:@"  /var/jb 可访问=%d\n", access("/var/jb", F_OK) == 0 ? 1 : 0];
+    [s appendFormat:@"  bundle=%s\n", [[[NSBundle mainBundle] bundlePath] fileSystemRepresentation]];
+    [s appendFormat:@"  /bin/launchctl 可执行=%d\n", access("/bin/launchctl", X_OK) == 0 ? 1 : 0];
+
+    for (NSString *rel in @[@"usr/bin/dsh", @"usr/bin/dsh-ctl", @"usr/lib/dsh/bin/node"]) {
+        [s appendFormat:@"  %@:\n", rel];
+        [self resolveJailbreakPath:rel diagnostics:s];
+    }
+    return s;
+}
+
 + (NSString *)run:(NSString *)path
              args:(NSArray<NSString *> *)args
           timeout:(NSTimeInterval)timeout {
