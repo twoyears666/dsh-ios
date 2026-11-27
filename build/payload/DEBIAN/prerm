@@ -15,9 +15,14 @@ export PATH="$JB/usr/bin:$JB/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 # 只扫我们自己这一份（完整路径做模式），
 # 不要用 'dsh/lib/bin.js' —— 那会连 npm 全局的 dsh 一起杀掉。
 KERNEL_ARGV="$D/node_modules/@deepseek-ai/dsh/lib/bin.js"
-if [ -x "$JB/usr/bin/dsh-ctl" ]; then
-    "$JB/usr/bin/dsh-ctl" clear >/dev/null 2>&1 || true
-fi
+# 这里**故意不调用 dsh-ctl**。
+#
+# 升级时 dpkg 先跑旧包的 prerm，而磁盘上的 dsh-ctl 还是旧版本 ——
+# .44 那版的 kill_kernels 会读 pidfile 并对裸 PID 执行 kill（root 身份），
+# 正是「装包时设备重启」最可疑的那条。
+# 新版本的 dsh-ctl 已经改成只按路径匹配，但升级路径上跑的是旧的。
+#
+# 所以 prerm 自己做（下面两行 pkill 就是），不依赖任何可能过期的工具。
 [ -f "$PLIST" ] && launchctl bootout system "$PLIST" 2>/dev/null || true
 pkill -f "$KERNEL_ARGV" 2>/dev/null || true
 pkill -f "$JB/usr/bin/dsh web" 2>/dev/null || true

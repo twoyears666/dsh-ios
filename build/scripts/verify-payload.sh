@@ -191,6 +191,65 @@ for f in $(find "$PAYLOAD/var/jb/usr/bin" -type f 2>/dev/null); do
     [ "$BAD_KILL" = "0" ] && ok "$name: 没有对非子进程的裸 PID kill"
 done
 
+# ---------------------------------------------------------------- 2.9 set -u 的未定义变量
+# 事故：.48 的 postinst 用了 set -u，而 $LABEL 从来没定义过。
+# 脚本在 §5.3 第一行 `launchctl enable "system/$LABEL"` 就中止 ——
+# bootstrap 没跑、install.log 没生成，退出码非 0，dpkg 又一次半配置。
+#
+# 只要脚本声明了 set -u，就必须保证每个被引用的变量都有定义。
+head1 '2.9 set -u 的未定义变量'
+
+code_lines() { grep -vE '^[[:space:]]*#' "$1" 2>/dev/null || true; }
+
+check_unset_vars() {
+    f="$1"; name="$2"
+    code_lines "$f" | grep -qE '^[[:space:]]*set[[:space:]]+-[a-zA-Z]*u' || return 0
+
+    DEFS=$(
+        {
+            # 普通赋值 / export 赋值
+            code_lines "$f" | grep -oE '^[[:space:]]*(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*=' \
+                | sed 's/^[[:space:]]*//; s/^export[[:space:]]*//; s/=$//'
+            # for VAR in ...
+            code_lines "$f" | grep -oE 'for[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]+in' \
+                | sed 's/^for[[:space:]]*//; s/[[:space:]]*in$//'
+            # 环境里本来就有 / shell 内置
+            printf '%s\n' PATH HOME PWD IFS LANG LC_ALL LC_CTYPE TMPDIR USER SHELL \
+                OLDPWD RANDOM LINENO OPTARG OPTIND PPID
+        } 2>/dev/null | sort -u
+    )
+
+    REFS=$(
+        {
+            code_lines "$f" | grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*\}' | tr -d '${}'
+            code_lines "$f" | grep -oE '\$[A-Za-z_][A-Za-z0-9_]*' | sed 's/^\$//'
+        } 2>/dev/null | sort -u
+    )
+
+    MISSING=""
+    for v in $REFS; do
+        printf '%s\n' "$DEFS" | grep -qx "$v" && continue
+        MISSING="$MISSING $v"
+    done
+
+    if [ -n "$MISSING" ]; then
+        fail "$name: set -u 下引用了未定义变量:$MISSING"
+        printf '      set -u 遇到未定义变量会立刻退出 —— 维护者脚本中途退出\n'
+        printf '      就等于 dpkg 半配置。要么定义它，要么别用 set -u。\n'
+    else
+        ok "$name: set -u 下没有未定义变量"
+    fi
+}
+
+for f in $(find "$PAYLOAD" -type f 2>/dev/null); do
+    [ -f "$f" ] || continue
+    case "$(head -1 "$f" 2>/dev/null)" in
+        '#!'*sh*) ;;
+        *) continue ;;
+    esac
+    check_unset_vars "$f" "$(printf '%s' "$f" | sed "s|$PAYLOAD/||")"
+done
+
 # ---------------------------------------------------------------- 3. 可能失败的命令
 head1 '3. 可能失败的命令（警告，不是红线）'
 for f in $(find "$PAYLOAD" -type f \( -name 'postinst' -o -name 'prerm' \) 2>/dev/null); do

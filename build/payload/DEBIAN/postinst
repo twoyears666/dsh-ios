@@ -12,11 +12,18 @@
 # 没有哪一步「失败就必须让安装失败」——装完内核没起来，用户可以打开 App
 # 看日志；但 dpkg 数据库坏了，用户什么都做不了。
 # 所以改成：不中断，失败的地方自己打日志，最后统一 exit 0。
-set -u
+#
+# 也**不用 set -u**：.48 里用了 set -u，而 $LABEL 从来没定义过，
+# 脚本在 §5.3 第一行就中止 —— bootstrap 没跑、install.log 没生成，
+# 而且退出码非 0，dpkg 又一次变成半配置。
+# 严格的 shell 选项在这个脚本里只会帮倒忙，两个都不要。
 
 JB=/var/jb
 D="$JB/usr/lib/dsh"
 ROOT=/var/mobile/Media/deepseek-harness
+# launchd job 的 Label，必须和 plist 里的 <key>Label</key> 一致。
+# 之前只定义了 PLIST 路径，$LABEL 是空的 —— 配合 set -u 直接让脚本中止。
+LABEL=com.twoyears.dsh
 OLD="$JB/var/mobile/.dsh"
 
 echo ""

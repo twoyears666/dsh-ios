@@ -238,6 +238,7 @@ CI 里也跑（`build-cli` 的第一步，几秒出结果）。它检查的是**
 | 红线 | 来自哪次事故 |
 |---|---|
 | 维护者脚本不许有 `set -e` | 诊断命令失败 → postinst 非 0 退出 → dpkg 半配置 → Sileo 打不开 |
+| 用了 `set -u` 就必须保证变量都有定义 | `.48` 里 `set -u` + 未定义的 `$LABEL` → 脚本在 §5.3 中止 → dpkg 又一次半配置 |
 | 不许 `kill "$变量"`（裸 PID） | pidfile 过期 + PID 回收 → root kill 可能命中 SpringBoard → 重启 |
 | 不许 `pkill -9` | 不给进程清理机会 |
 | 不许 `nohup` | 安装中拉起 300MB node，与 uicache 的 respring 叠加 |
@@ -251,7 +252,13 @@ CI 里也跑（`build-cli` 的第一步，几秒出结果）。它检查的是**
 `control` 文件里出现 Debian 不支持的 `#` 注释。
 
 **这个脚本本身也验证过**：往 payload 里注入 `set -e`、裸 PID `kill`、
-`pkill -9`、`nohup`，五种违规全部被拦下，退出码 1。
+`pkill -9`、`nohup`、`set -u` + 未定义变量，全部被拦下、退出码 1。
+
+校验项覆盖的正是已经发生过的三次事故：
+
+1. `set -e` → 诊断命令失败 → dpkg 半配置
+2. root/mobile 下对裸 PID `kill` → 误杀系统进程 → 重启 / respring
+3. `set -u` + 未定义变量 → 维护者脚本中途退出 → 又是半配置
 
 ### 两层闸门：构建时 + 装包时
 
