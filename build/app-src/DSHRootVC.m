@@ -280,6 +280,9 @@ static void DSHAppLog(NSString *fmt, ...) {
 - (void)recordKernelPid:(pid_t)pid;
 - (void)observeAppLifecycle;
 - (void)logSpawnLogTail;
+- (void)showTierPicker;
+- (void)applyTier:(NSString *)tier;
+- (nullable NSString *)effectiveTierName;
 - (nullable NSString *)bundledNodePath;
 - (void)handleProbeResult:(BOOL)up;
 - (void)loadWithToken:(nullable NSString *)token;
@@ -613,11 +616,27 @@ static NSString *const kDSHDataRoot = @"/var/mobile/Media/deepseek-harness";
 
 /// launcher 会把选好的档位缓存到 $DSH_HOME/.dsh-tier。
 /// 读它就能知道这台设备该用哪一档，不必在 App 里重新探测。
+/// 用户在 App 里手动指定的档位（config/tier），优先于设备探测的缓存。
+- (nullable NSString *)userTierName {
+    NSString *p = [kDSHDataRoot stringByAppendingPathComponent:@"config/tier"];
+    NSString *s = [NSString stringWithContentsOfFile:p encoding:NSUTF8StringEncoding error:NULL];
+    s = [s stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    return s.length > 0 ? s : nil;
+}
+
+/// 设备探测出来的档位（tier.sh 写的缓存）。
 - (nullable NSString *)cachedTierName {
     NSString *p = [kDSHDataRoot stringByAppendingPathComponent:@"data/.dsh-tier"];
     NSString *s = [NSString stringWithContentsOfFile:p encoding:NSUTF8StringEncoding error:NULL];
     s = [s stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     return s.length > 0 ? s : nil;
+}
+
+/// 实际生效的档位：用户指定 > 设备缓存 > 最保守的 nowasm
+- (nullable NSString *)effectiveTierName {
+    NSString *t = [self userTierName];
+    if (t.length > 0) return t;
+    return [self cachedTierName];
 }
 
 /// 与 tier.sh 里的 TIERS 表保持一致。
@@ -743,8 +762,9 @@ static NSString *const kDSHDataRoot = @"/var/mobile/Media/deepseek-harness";
     DSHAppLog(@"起内核前清理旧实例：杀掉 %d 个", killed);
     if (killed > 0) usleep(800 * 1000);   // 给端口释放留点时间
 
-    NSString *tier = [self cachedTierName];
-    NSString *tierSource = tier ? @"缓存" : @"默认(nowasm)";
+    NSString *tier = [self effectiveTierName];
+    NSString *tierSource = [self userTierName] ? @"手动指定"
+                        : ([self cachedTierName] ? @"设备探测缓存" : @"默认(nowasm)");
     if (!tier) tier = @"nowasm";
     NSArray *tierArgs = [self tierArgsForName:tier];
 
@@ -813,6 +833,69 @@ static NSString *const kDSHDataRoot = @"/var/mobile/Media/deepseek-harness";
 ///
 /// 内核起不来时真正的原因几乎都在 app-spawn.log 里（端口被占、依赖缺失、
 /// 启动脚本报错……）。App 自己带出来，就不用每次都要用户手动打包日志。
+/// V8 档位选择器。
+///
+/// 默认档位是 tier.sh 在设备上逐档探测出来的，缓存在 data/.dsh-tier。
+/// 这台设备探测结果是 nowasm（= --jitless），因为更高的档位会让
+/// V8 后台线程写可执行页 → SIGBUS。代价是性能低、WASM 不可用。
+///
+/// 这里允许手动覆盖（写 config/tier），或者清掉缓存让它重新探测。
+- (void)showTierPicker {
+    NSString *current = [self effectiveTierName] ?: @"nowasm";
+    NSString *source = [self userTierName] ? @"手动指定"
+                     : ([self cachedTierName] ? @"设备探测缓存" : @"默认");
+    NSString *msg = [NSString stringWithFormat:
+        @"当前：%@（%@）\n\n"
+         "nowasm = --jitless，不生成任何可执行代码，最稳但最慢；\n"
+         "native = 不加参数，最快，但可能 SIGBUS 崩溃。", current, source];
+
+    UIAlertController *a = [UIAlertController
+        alertControllerWithTitle:@"V8 启动档位" message:msg
+                  preferredStyle:UIAlertControllerStyleActionSheet];
+
+    NSArray<NSString *> *tiers = @[ @"native", @"single", @"balanced", @"safe", @"nowasm" ];
+    for (NSString *t in tiers) {
+        NSString *title = [t isEqualToString:current] ? [t stringByAppendingString:@" ✓"] : t;
+        [a addAction:[UIAlertAction actionWithTitle:title style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *_) {
+            [self applyTier:t];
+        }]];
+    }
+    [a addAction:[UIAlertAction actionWithTitle:@"重新探测（清缓存）"
+                                          style:UIAlertActionStyleDefault
+                                        handler:^(UIAlertAction *_) {
+        NSString *userTier = [kDSHDataRoot stringByAppendingPathComponent:@"config/tier"];
+        NSString *cache = [kDSHDataRoot stringByAppendingPathComponent:@"data/.dsh-tier"];
+        [[NSFileManager defaultManager] removeItemAtPath:userTier error:NULL];
+        [[NSFileManager defaultManager] removeItemAtPath:cache error:NULL];
+        DSHAppLog(@"档位：清掉手动指定与探测缓存，下次启动走默认 nowasm");
+        [self toast:@"缓存已清除。重启内核后生效（下次启动 dsh 会重新探测）"];
+    }]];
+    [a addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+
+    // iPad 上 action sheet 必须有锚点，否则直接崩
+    if (self.menuButton.window) {
+        a.popoverPresentationController.sourceView = self.menuButton;
+        a.popoverPresentationController.sourceRect = self.menuButton.bounds;
+    } else {
+        a.popoverPresentationController.sourceView = self.view;
+        a.popoverPresentationController.sourceRect =
+            CGRectMake(CGRectGetMidX(self.view.bounds), CGRectGetMidY(self.view.bounds), 1, 1);
+    }
+    [self presentViewController:a animated:YES completion:nil];
+}
+
+- (void)applyTier:(NSString *)tier {
+    NSString *dir = [kDSHDataRoot stringByAppendingPathComponent:@"config"];
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir
+                             withIntermediateDirectories:YES attributes:nil error:NULL];
+    NSString *p = [dir stringByAppendingPathComponent:@"tier"];
+    [tier writeToFile:p atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+    DSHAppLog(@"档位已设为 %@，重启内核生效", tier);
+    [self toast:[NSString stringWithFormat:@"已设为 %@，正在重启内核…", tier]];
+    [self ctl:@"restart" message:@"正在按新档位重启内核…"];
+}
+
 - (void)logSpawnLogTail {
     NSString *p = [kDSHDataRoot stringByAppendingPathComponent:@"logs/app-spawn.log"];
     NSString *text = [NSString stringWithContentsOfFile:p
@@ -1539,6 +1622,10 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
 
         case DSHMenuActionVoice:
             [self startVoiceInput];
+            break;
+
+        case DSHMenuActionTier:
+            [self showTierPicker];
             break;
 
         case DSHMenuActionAbout: {

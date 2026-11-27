@@ -47,6 +47,8 @@
         // 语音输入：mac 桌面端走 sherpa-onnx，iOS 没有产物，
         // 这里用系统 SFSpeechRecognizer（不占体积、中文可用）
         [self action:@"语音输入" image:@"mic" act:DSHMenuActionVoice disabled:NO],
+        // V8 启动档位：默认是设备探测出来的（通常是 nowasm / --jitless）
+        [self action:@"V8 启动档位" image:@"speedometer" act:DSHMenuActionTier disabled:NO],
     ]];
 
     UIMenu *system = [UIMenu menuWithTitle:@"内核"

@@ -25,6 +25,7 @@ typedef NS_ENUM(NSInteger, DSHMenuAction) {
     DSHMenuActionClearProcess,
     DSHMenuActionProcessList,
     DSHMenuActionVoice,
+    DSHMenuActionTier,
     DSHMenuActionAbout,
 };
 
