@@ -223,24 +223,17 @@ cmd_stop() {
 # 不碰设备上别的 dsh 安装。
 # dsh-ctl 只能用 date / nc / pkill / sed，不要引入 fuser / lsof / pgrep。
 kill_kernels() {
-    # 1) 优先用 pidfile（launcher 写入，最准）
-    if [ -f "$PIDFILE" ]; then
-        _p=$(sed -n '1p' "$PIDFILE" 2>/dev/null)
-        case "$_p" in
-            ''|*[!0-9]*) ;;
-            *) kill "$_p" 2>/dev/null || true ;;
-        esac
-    fi
-
-    # 2) 按 argv 扫本移植版的内核。
-    #    用完整安装路径做模式，而不是 'dsh/lib/bin.js'：
-    #    后者会命中设备上任何 dsh（npm 全局装的、别的越狱包），
-    #    我们要停的只是自己这一份。
+    # 只按 argv 模式杀，**绝不对 pidfile 里的裸 PID 发信号**。
+    #
+    # 原因：pidfile 可能是过期的。PID 被系统回收后会分给别的进程，
+    # 而 postinst / prerm 是以 root 跑的 —— 一个 kill 下去就可能命中
+    # SpringBoard、backboardd 之类，直接重启甚至 panic。
+    # 真机上装包时设备重启过一次，最可疑的就是这条。
+    #
+    # 按 argv 模式杀不可能误伤：模式里带着本移植版的完整安装路径，
+    # 只有真的在跑我们这份内核的进程才会匹配。
     pkill -f "$KERNEL_ARGV" 2>/dev/null || true
-
-    # 3) 连 launcher 外壳一起收掉，避免它把子进程重新拉起
     pkill -f "$LAUNCHER_ARGV" 2>/dev/null || true
-
     rm -f "$PIDFILE" 2>/dev/null || true
 }
 

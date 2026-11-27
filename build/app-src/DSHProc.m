@@ -143,6 +143,20 @@ static NSString *const kKernelPidFile = @"/var/mobile/Media/deepseek-harness/con
     return (pid > 0 && pid < 1000000) ? (pid_t)pid : 0;
 }
 
+/// 这个 pid 到底是不是我们的内核。
+///
+/// 必须校验：pidfile 可能是过期的，PID 被系统回收后会分给别的进程
+/// （SpringBoard 也是 mobile 身份，App 一样杀得掉）。
+/// 拿不到可执行路径时一律返回 NO —— 宁可杀不掉，也不能误杀。
++ (BOOL)isKernelPid:(pid_t)pid {
+    if (pid <= 0) return NO;
+    NSString *path = DSHExecutablePath(pid);
+    if (path.length == 0) return NO;
+    return [path containsString:@"/dsh/"]
+        || [path containsString:@"dsh/bin/node"]
+        || [path containsString:@"/var/jb/usr/bin/dsh"];
+}
+
 + (BOOL)stopKernelWait:(NSTimeInterval)seconds {
     pid_t pid = [self kernelPid];
     if (pid <= 0) {
@@ -153,6 +167,13 @@ static NSString *const kKernelPidFile = @"/var/mobile/Media/deepseek-harness/con
         // 已经不在
         [[NSFileManager defaultManager] removeItemAtPath:kKernelPidFile error:NULL];
         return YES;
+    }
+
+    // 关键：确认这个 pid 真的是我们的内核，否则绝不发信号
+    if (![self isKernelPid:pid]) {
+        NSLog(@"[dsh] pidfile 里的 pid %d 不是我们的内核，跳过 kill", pid);
+        [[NSFileManager defaultManager] removeItemAtPath:kKernelPidFile error:NULL];
+        return NO;
     }
 
     kill(pid, SIGTERM);

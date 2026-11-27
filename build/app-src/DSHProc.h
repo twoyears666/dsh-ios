@@ -35,6 +35,10 @@ NS_ASSUME_NONNULL_BEGIN
 /// 从 pidfile 读内核 pid，读不到返回 0。
 + (pid_t)kernelPid;
 
+/// 校验这个 pid 确实是我们的内核（按可执行路径判断）。
+/// pidfile 可能过期，PID 回收后会指向别的进程 —— 杀之前必须过这一关。
++ (BOOL)isKernelPid:(pid_t)pid;
+
 /// 停内核：SIGTERM → 等 → SIGKILL。返回 YES 表示确认已退出。
 /// 只对同 uid 的进程有效 —— 内核由 launchd 以 mobile 身份启动，App 也是 mobile。
 + (BOOL)stopKernelWait:(NSTimeInterval)seconds;

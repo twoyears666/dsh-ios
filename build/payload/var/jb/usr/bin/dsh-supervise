@@ -70,6 +70,12 @@ kill_kernel() {
 }
 
 say "启动（端口 $PORT）"
+
+# 启动延迟：安装完的瞬间 uicache 正在触发 respring，
+# 同时再拉起一个 300MB 的 node 进程，在内存紧张的设备上很危险
+# （真机上装包时设备重启过一次）。错开 8 秒，代价可以接受。
+sleep 8
+
 BACKOFF=2
 
 while :; do

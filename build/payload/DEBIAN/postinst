@@ -123,15 +123,17 @@ PLIST="$JB/Library/LaunchDaemons/com.twoyears.dsh.plist"
 # npm 全局的 dsh 或别的越狱包，升级我们不应该把它们杀掉。
 export PATH="$JB/usr/bin:$JB/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 KERNEL_ARGV="$D/node_modules/@deepseek-ai/dsh/lib/bin.js"
-if [ -x "$JB/usr/bin/dsh-ctl" ]; then
-    "$JB/usr/bin/dsh-ctl" clear >/dev/null 2>&1 || true
-else
-    pkill -f "$KERNEL_ARGV" 2>/dev/null || true
-    pkill -f "$JB/usr/bin/dsh web" 2>/dev/null || true
-    sleep 1
-    pkill -9 -f "$KERNEL_ARGV" 2>/dev/null || true
-    pkill -9 -f "$JB/usr/bin/dsh web" 2>/dev/null || true
-fi
+
+# 只按 argv 模式杀（路径模式，只有我们这份内核会匹配）。
+#
+# 以前这里是 `dsh-ctl clear` —— 它以 root 身份跑，内部会对 pidfile 里的
+# 裸 PID 发 kill。pidfile 过期 + PID 被系统回收后，就可能命中
+# SpringBoard / backboardd 之类，直接重启甚至 panic。
+# 真机上装包时设备重启过一次，这条嫌疑最大，所以彻底不用了。
+#
+# 也不再升级到 SIGKILL：TERM 足够，少一次强杀就少一分风险。
+pkill -f "$KERNEL_ARGV" 2>/dev/null || true
+pkill -f "$JB/usr/bin/dsh web" 2>/dev/null || true
 rm -f "$ROOT/config/kernel.pid" 2>/dev/null || true
 
 # 5.2 版本戳：让 App / dsh-ctl 能看出当前装的是哪个版本
@@ -185,14 +187,15 @@ if [ -f "$PLIST" ]; then
 
     install_diag "注册完成"
 
-    # 兜底：launchd 没接住就自己拉起来。虽然是 root 起的一次性进程，
-    # 但至少内核能用；下次重启再由 launchd 接管。
+    # 这里**不再**用 nohup 兜底起 node。
+    #
+    # 上一版这么干过：安装过程中以 root 拉起 node（iOS 上 300MB+、
+    # 冷启动 20-60 秒），而紧接着 uicache 还会触发 respring。
+    # 两者叠加在内存紧张的设备上很危险，真机上装包时设备重启过一次。
+    # 宁可这次装完内核没起来（用户能看到日志），也不要冒这个风险。
     if ! nc -z 127.0.0.1 3080 2>/dev/null; then
-        echo "$(date '+%Y-%m-%d %H:%M:%S') launchd 未拉起内核，postinst 直接启动监督进程" \
+        echo "$(date '+%Y-%m-%d %H:%M:%S') 警告：launchd 未拉起内核，请打开 App 查看 install.log" \
             >>"$INSTALL_LOG"
-        (nohup "$JB/usr/bin/dsh-supervise" >>"$ROOT/logs/supervise.log" 2>&1 &) 2>/dev/null || true
-        sleep 4
-        install_diag "兜底启动后"
     fi
 fi
 
