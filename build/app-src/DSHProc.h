@@ -39,6 +39,14 @@ NS_ASSUME_NONNULL_BEGIN
 /// pidfile 可能过期，PID 回收后会指向别的进程 —— 杀之前必须过这一关。
 + (BOOL)isKernelPid:(pid_t)pid;
 
+/// 找出所有「本移植版内核」进程的 pid（按可执行路径判定，不靠 pidfile）。
+/// 用于起新内核前清理占用 3080 的旧实例。
++ (NSArray<NSNumber *> *)kernelPids;
+
+/// 杀掉所有本移植版内核进程，最多等 seconds 秒。
+/// @return 杀掉的进程数
++ (int)killAllKernelsWait:(NSTimeInterval)seconds;
+
 /// 停内核：SIGTERM → 等 → SIGKILL。返回 YES 表示确认已退出。
 /// 只对同 uid 的进程有效 —— 内核由 launchd 以 mobile 身份启动，App 也是 mobile。
 + (BOOL)stopKernelWait:(NSTimeInterval)seconds;

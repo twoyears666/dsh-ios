@@ -157,6 +157,48 @@ static NSString *const kKernelPidFile = @"/var/mobile/Media/deepseek-harness/con
         || [path containsString:@"/var/jb/usr/bin/dsh"];
 }
 
++ (NSArray<NSNumber *> *)kernelPids {
+    NSMutableArray<NSNumber *> *out = [NSMutableArray array];
+    for (NSDictionary *p in [self allProcesses]) {
+        pid_t pid = (pid_t)[p[@"pid"] intValue];
+        if (pid <= 0 || pid == getpid()) continue;
+        NSString *path = p[@"path"] ?: @"";
+        // 内核现在的可执行文件是 App bundle 里的 node；
+        // 老布局是 /var/jb/usr/lib/dsh/bin/node。
+        if ([path containsString:@"DSH.app/runtime/node"]
+            || [path containsString:@"dsh/bin/node"]
+            || [path containsString:@"dsh/lib/bin.js"]) {
+            [out addObject:@(pid)];
+        }
+    }
+    return out;
+}
+
++ (int)killAllKernelsWait:(NSTimeInterval)seconds {
+    NSArray<NSNumber *> *pids = [self kernelPids];
+    if (pids.count == 0) return 0;
+
+    NSLog(@"[dsh] 清理旧内核 %lu 个: %@", (unsigned long)pids.count, pids);
+    for (NSNumber *n in pids) kill((pid_t)n.intValue, SIGTERM);
+
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:seconds];
+    while ([deadline timeIntervalSinceNow] > 0) {
+        BOOL any = NO;
+        for (NSNumber *n in pids) {
+            if (kill((pid_t)n.intValue, 0) == 0) { any = YES; break; }
+        }
+        if (!any) break;
+        usleep(200 * 1000);
+    }
+    for (NSNumber *n in pids) {
+        if (kill((pid_t)n.intValue, 0) == 0) kill((pid_t)n.intValue, SIGKILL);
+    }
+    usleep(300 * 1000);
+
+    [[NSFileManager defaultManager] removeItemAtPath:kKernelPidFile error:NULL];
+    return (int)pids.count;
+}
+
 + (BOOL)stopKernelWait:(NSTimeInterval)seconds {
     pid_t pid = [self kernelPid];
     if (pid <= 0) {

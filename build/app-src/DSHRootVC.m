@@ -279,6 +279,7 @@ static void DSHAppLog(NSString *fmt, ...) {
 - (NSDictionary<NSString *, NSString *> *)kernelEnvironment;
 - (void)recordKernelPid:(pid_t)pid;
 - (void)observeAppLifecycle;
+- (void)logSpawnLogTail;
 - (nullable NSString *)bundledNodePath;
 - (void)handleProbeResult:(BOOL)up;
 - (void)loadWithToken:(nullable NSString *)token;
@@ -732,6 +733,16 @@ static NSString *const kDSHDataRoot = @"/var/mobile/Media/deepseek-harness";
                        stringByAppendingPathComponent:@"node_modules/@deepseek-ai/dsh/lib/bin.js"];
     NSString *imgShim = [kDSHInstallDir stringByAppendingPathComponent:@"ios-image-shim.mjs"];
 
+    // 关键：先清掉可能还占着 3080 的旧内核。
+    //
+    // 真机上就是这个死循环：旧内核还在跑（或卡在启动中）→ 新内核
+    // EADDRINUSE 立刻退出 → App 探测失败 → 再起一个 → 还是被占。
+    // app-spawn.log 里的原文：
+    //   Error: listen EADDRINUSE: address already in use 127.0.0.1:3080
+    int killed = [DSHProc killAllKernelsWait:4];
+    DSHAppLog(@"起内核前清理旧实例：杀掉 %d 个", killed);
+    if (killed > 0) usleep(800 * 1000);   // 给端口释放留点时间
+
     NSString *tier = [self cachedTierName];
     NSString *tierSource = tier ? @"缓存" : @"默认(nowasm)";
     if (!tier) tier = @"nowasm";
@@ -797,6 +808,29 @@ static NSString *const kDSHDataRoot = @"/var/mobile/Media/deepseek-harness";
     DSHAppLog(@"  已写 pidfile: %d", pid);
 }
 
+/// 把子进程日志的尾部写进 app.log。
+///
+/// 内核起不来时真正的原因几乎都在 app-spawn.log 里（端口被占、依赖缺失、
+/// 启动脚本报错……）。App 自己带出来，就不用每次都要用户手动打包日志。
+- (void)logSpawnLogTail {
+    NSString *p = [kDSHDataRoot stringByAppendingPathComponent:@"logs/app-spawn.log"];
+    NSString *text = [NSString stringWithContentsOfFile:p
+                                               encoding:NSUTF8StringEncoding error:NULL];
+    if (text.length == 0) {
+        DSHAppLog(@"  app-spawn.log: (空)");
+        return;
+    }
+    NSArray *lines = [text componentsSeparatedByString:@"\n"];
+    NSUInteger from = lines.count > 12 ? lines.count - 12 : 0;
+    NSMutableArray *tail = [NSMutableArray array];
+    for (NSUInteger i = from; i < lines.count; i++) {
+        NSString *l = [lines[i] stringByTrimmingCharactersInSet:
+                       [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (l.length > 0) [tail addObject:l];
+    }
+    DSHAppLog(@"  app-spawn.log 尾部:\n    %@", [tail componentsJoinedByString:@"\n    "]);
+}
+
 - (void)probeExecutables {
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSArray<NSArray *> *cases = @[
@@ -854,6 +888,7 @@ static NSString *const kDSHDataRoot = @"/var/mobile/Media/deepseek-harness";
             self.statusLabel.text = [NSString stringWithFormat:
                 @"内核未响应，重新启动（第 %ld 次）…", (long)self.kernelStartAttempts];
             DSHAppLog(@"探测超时，重新请求启动（第 %ld 次）", (long)self.kernelStartAttempts);
+            [self logSpawnLogTail];
             [self ensureKernelRunning];
             return;
         }
