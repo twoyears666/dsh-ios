@@ -172,6 +172,19 @@ jobs:
           cp build/shims/ripgrep-index.js                    "$NM/@vscode/ripgrep/lib/index.js"
           echo "已替换 3 个 shim"
 
+          # 平台专属包：mac 的 app.asar 里只有 darwin 版本，win32 / pwsh 包不存在。
+          # 但 dsh 的 subprocess-local / sandbox-local / terminal-bash 是
+          # **顶层静态 import** 它们的，缺包会让整个 ESM 模块加载失败：
+          #   subprocess、sandbox 服务起不来 → bash-sandbox / permission /
+          #   ptc-runtime / terminal-controller 全部 pending → bash 工具不可用。
+          # 真机日志里就是这么挂的。这里用最小 stub 顶上，
+          # Windows 分支在 iOS 上永远不会执行。
+          for p in win32-process sandbox-windows-acl pwsh-local; do
+            rm -rf "$NM/@deepseek-ai/dsh-$p"
+            cp -R "build/shims/pkg-$p" "$NM/@deepseek-ai/dsh-$p"
+            echo "  已安装 stub: @deepseek-ai/dsh-$p"
+          done
+
       - name: 裁剪依赖树
         run: |
           NM=build/work/npm/node_modules

@@ -149,6 +149,55 @@ PATCHES.push({
   check: 'esm',
 });
 
+// ---------------------------------------------------------------- 7. 会话编码不再抛错
+// 真机日志里的真实故障：
+//   workspace: Error: session artifact ".../session.v4.jsonl" uses .jsonl,
+//   but this backend is configured for compression "zstd"
+// workspace 服务一挂，session-controller / workspace-controller /
+// ui-deliverables / workspace-changes 全部 pending —— 整个 UI 不可用。
+//
+// 之前只补了 findOppositeGenerationInDirectory（让它适配并把 compression
+// 翻过来），但那个函数现在返回的是「迁移描述」而不是错误路径，
+// 两个调用方仍然把「返回值非 undefined」当成出错：
+//   checkRootEncoding()      → throw encodingMismatch
+//   rejectOppositeArtifact() → throw encodingMismatch
+// 所以补丁等于没生效。这里把两个调用方改成「只触发适配，不抛错」。
+PATCHES.push({
+  name: '会话编码检查不抛错（根目录）',
+  file: '@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js',
+  old: `\tasync checkRootEncoding() {
+\t\tawait this.mapSessionDirectories(async (dir) => {
+\t\t\tconst incompatible = await this.findOppositeGenerationInDirectory(dir);
+\t\t\tif (incompatible !== void 0) throw this.encodingMismatch(incompatible);
+\t\t});
+\t}`,
+  new: `\tasync checkRootEncoding() {
+\t\t// dsh-iOS: 不再因相反编码抛错。
+\t\t// findOppositeGenerationInDirectory 现在返回迁移描述（不是错误路径），
+\t\t// 读取路径会自己适配；这里再抛会让 workspace 服务整体挂掉。
+\t\tawait this.mapSessionDirectories(async (dir) => {
+\t\t\tawait this.findOppositeGenerationInDirectory(dir);
+\t\t});
+\t}`,
+  marker: 'dsh-iOS: 不再因相反编码抛错。',
+  check: 'esm',
+});
+
+PATCHES.push({
+  name: '会话编码检查不抛错（单会话）',
+  file: '@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js',
+  old: `\tasync rejectOppositeArtifact(cwd, id) {
+\t\tconst path = await this.findOppositeGenerationInDirectory(sessionDir(this.root, cwd, id));
+\t\tif (path !== void 0) throw this.encodingMismatch(path);
+\t}`,
+  new: `\tasync rejectOppositeArtifact(cwd, id) {
+\t\t// dsh-iOS: 同上 —— 存在旧格式会话文件时不再拒绝，交给读取路径适配。
+\t\tawait this.findOppositeGenerationInDirectory(sessionDir(this.root, cwd, id));
+\t}`,
+  marker: 'dsh-iOS: 同上 —— 存在旧格式会话文件时不再拒绝',
+  check: 'esm',
+});
+
 // ---------------------------------------------------------------- 执行
 let ok = 0, skipped = 0, failed = 0;
 

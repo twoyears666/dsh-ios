@@ -1,0 +1,11 @@
+{
+  "name": "@deepseek-ai/dsh-win32-process",
+  "version": "0.0.0-ios-shim",
+  "private": true,
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./runner": "./lib/index.js"
+  }
+}
