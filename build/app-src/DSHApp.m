@@ -402,6 +402,26 @@ static void DSHLog(NSString *fmt, ...) {
                    dispatch_get_main_queue(), ^{ [self poll]; });
 }
 
+/// 把 app-spawn.log 尾部写进 minimal.log。
+/// 内核的 stdout（含带 token 的 URL）全在这里，出问题时必须看得到。
+- (void)dumpSpawnLogTail {
+    NSString *p = [kDataRoot stringByAppendingPathComponent:@"logs/app-spawn.log"];
+    NSString *text = [NSString stringWithContentsOfFile:p
+                                               encoding:NSUTF8StringEncoding error:NULL];
+    if (text.length == 0) {
+        DSHLog(@"  app-spawn.log 为空或不存在");
+        return;
+    }
+    NSArray *lines = [text componentsSeparatedByString:@"\n"];
+    DSHLog(@"  app-spawn.log 共 %lu 行，尾部：", (unsigned long)lines.count);
+    NSUInteger from = lines.count > 10 ? lines.count - 10 : 0;
+    for (NSUInteger i = from; i < lines.count; i++) {
+        NSString *l = [lines[i] stringByTrimmingCharactersInSet:
+                       [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (l.length > 0) DSHLog(@"    %@", l);
+    }
+}
+
 /// 从内核日志里抓 launch token（内核启动时会打印带 token 的 URL）。
 /// 取最后一个 —— 内核可能重启过多次，只有最新的有效。
 - (nullable NSString *)scrapeLaunchToken {
@@ -412,10 +432,14 @@ static void DSHLog(NSString *fmt, ...) {
                                                    encoding:NSUTF8StringEncoding error:NULL];
     fromFile = [fromFile stringByTrimmingCharactersInSet:
                 [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSDictionary *attrs = [[NSFileManager defaultManager]
+                           attributesOfItemAtPath:tokenFile error:NULL];
     if (fromFile.length > 0) {
-        DSHLog(@"  token 来自文件 config/web-token");
+        DSHLog(@"  token 来自文件 config/web-token（%lu 字节）", (unsigned long)fromFile.length);
         return fromFile;
     }
+    DSHLog(@"  config/web-token 不可用（存在=%@，大小=%@）",
+           attrs ? @"是" : @"否", attrs ? attrs[NSFileSize] : @"-");
 
     // 回退：从日志里正则抓（老版本内核没有写文件）
     NSString *p = [kDataRoot stringByAppendingPathComponent:@"logs/web.log"];
@@ -470,7 +494,8 @@ static void DSHLog(NSString *fmt, ...) {
                 }];
                 return;
             }
-            DSHLog(@"401：web.log 里没抓到 token —— 内核可能还没打印，或日志被截断");
+            DSHLog(@"401：两个来源都没拿到 token");
+            [self dumpSpawnLogTail];
         }
         dispatch_async(dispatch_get_main_queue(), ^{ [self load]; });
     }] resume];
