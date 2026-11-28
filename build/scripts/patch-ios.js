@@ -246,6 +246,25 @@ PATCHES.push({
   check: 'esm',
 });
 
+// ---------------------------------------------------------------- 9. 固定 launch token
+// SFSafariViewController 的 URL 是写死在 App 里的静态字符串，没法跟随每次
+// 启动随机变的 launchToken。裸 "/" 必 401，前端 JS 全部不加载。
+// 参考 yitenchen123/dsh-ios：让 processLaunchToken 优先读 DSH_WEB_TOKEN
+// 环境变量（内核 env 注入），缺省用固定值 —— 保证终端手动 dsh web 时也一致。
+// local loopback-only，无跨设备暴露。
+PATCHES.push({
+  name: '固定 launch token（Safari URL 静态匹配）',
+  file: '@deepseek-ai/dsh-client-connection/lib/index.js',
+  old: `function processLaunchToken(owner) {`,
+  new: `function processLaunchToken(owner) {
+\t// dsh-iOS: 固定 loopback token，供 SFSafariViewController 的静态 URL 匹配。
+\t// 裸 "/" 必 401；DSH_WEB_TOKEN 由 App env 注入，缺省值保证终端启动也一致。
+\tconst __fixed = process.env.DSH_WEB_TOKEN || "dshios-fixed-token-8f3a2c";
+\tif (__fixed) return __fixed;`,
+  marker: 'dsh-iOS: 固定 loopback token',
+  check: 'esm',
+});
+
 // ---------------------------------------------------------------- 执行
 let ok = 0, skipped = 0, failed = 0;
 
