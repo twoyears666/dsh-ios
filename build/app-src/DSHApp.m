@@ -26,6 +26,7 @@
 #import "DSHShell.h"
 #import "DSHProc.h"
 #import "DSHJIT.h"
+#import "DSHPicker.h"
 
 static NSString *const kJB       = @"/var/jb";
 static NSString *const kInstall  = @"/var/jb/usr/lib/dsh";
@@ -100,6 +101,7 @@ static void DSHLog(NSString *fmt, ...) {
 @property (nonatomic, strong) WKWebView *web;
 @property (nonatomic, strong) UILabel *hint;
 @property (nonatomic, assign) NSInteger tries;
+@property (nonatomic, strong) DSHPicker *picker;
 @end
 
 @implementation DSHWebVC
@@ -144,6 +146,12 @@ static void DSHLog(NSString *fmt, ...) {
     [cfg.userContentController addScriptMessageHandler:(id<WKScriptMessageHandler>)self
                                                   name:@"dsherr"];
 
+    // 唯一保留的 bridge API：目录选择器（「增加工作区」要用）
+    [cfg.userContentController addUserScript:
+        [[WKUserScript alloc] initWithSource:[DSHPicker userScriptSource]
+                               injectionTime:WKUserScriptInjectionTimeAtDocumentStart
+                            forMainFrameOnly:YES]];
+
     self.web = [[WKWebView alloc] initWithFrame:CGRectZero configuration:cfg];
     self.web.navigationDelegate = self;
     self.web.opaque = NO;
@@ -172,6 +180,11 @@ static void DSHLog(NSString *fmt, ...) {
         [self.hint.leadingAnchor constraintGreaterThanOrEqualToAnchor:safe.leadingAnchor constant:24],
         [self.hint.trailingAnchor constraintLessThanOrEqualToAnchor:safe.trailingAnchor constant:-24],
     ]];
+
+    // picker 需要 webView，所以放在 webView 创建之后
+    self.picker = [[DSHPicker alloc] initWithPresenter:self webView:self.web];
+    [cfg.userContentController addScriptMessageHandler:self.picker
+                                                  name:[DSHPicker messageName]];
 
     [self startKernel];
 }
