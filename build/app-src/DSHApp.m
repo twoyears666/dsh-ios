@@ -96,7 +96,7 @@ static void DSHLog(NSString *fmt, ...) {
 
 #pragma mark - 视图
 
-@interface DSHWebVC : UIViewController <WKNavigationDelegate>
+@interface DSHWebVC : UIViewController <WKNavigationDelegate, WKScriptMessageHandler>
 @property (nonatomic, strong) WKWebView *web;
 @property (nonatomic, strong) UILabel *hint;
 @property (nonatomic, assign) NSInteger tries;
@@ -112,6 +112,31 @@ static void DSHLog(NSString *fmt, ...) {
     cfg.allowsInlineMediaPlayback = YES;
     cfg.mediaTypesRequiringUserActionForPlayback = WKAudiovisualMediaNone;
     cfg.websiteDataStore = [WKWebsiteDataStore defaultDataStore];
+
+    // 抓页面里的 JS 报错。
+    //
+    // 现象是「Safari 打不开、换个浏览器能打开」—— 服务端没问题，
+    // 说明 WebKit 上页面脚本炸了。但 WKWebView 默认拿不到 console，
+    // 所以注入一段钩子：window.onerror / unhandledrejection /
+    // console.error 全部转发到原生，写进 minimal.log。
+    // 这是诊断代码，不提供任何给网页用的能力。
+    NSString *hook =
+        @"(function(){"
+         "function send(k,m){try{window.webkit.messageHandlers.dsherr.postMessage(k+': '+m);}catch(e){}}"
+         "window.addEventListener('error',function(e){"
+         "send('error',(e.message||'?')+' @ '+(e.filename||'?')+':'+(e.lineno||0));},true);"
+         "window.addEventListener('unhandledrejection',function(e){"
+         "send('rejection',String(e.reason&&e.reason.stack||e.reason));},true);"
+         "var ce=console.error;console.error=function(){"
+         "try{send('console.error',Array.prototype.map.call(arguments,String).join(' '));}catch(x){}"
+         "return ce.apply(console,arguments);};"
+         "})();";
+    [cfg.userContentController addUserScript:
+        [[WKUserScript alloc] initWithSource:hook
+                               injectionTime:WKUserScriptInjectionTimeAtDocumentStart
+                            forMainFrameOnly:NO]];
+    [cfg.userContentController addScriptMessageHandler:(id<WKScriptMessageHandler>)self
+                                                  name:@"dsherr"];
 
     self.web = [[WKWebView alloc] initWithFrame:CGRectZero configuration:cfg];
     self.web.navigationDelegate = self;
@@ -266,8 +291,22 @@ static void DSHLog(NSString *fmt, ...) {
 
 #pragma mark WKNavigationDelegate
 
+- (void)userContentController:(WKUserContentController *)ucc
+      didReceiveScriptMessage:(WKScriptMessage *)message {
+    DSHLog(@"页面报错 %@", message.body);
+}
+
 - (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
     DSHLog(@"页面加载完成：%@", webView.URL.absoluteString);
+    // 白屏时最需要知道的两件事：标题有没有、正文有多长
+    [webView evaluateJavaScript:
+        @"JSON.stringify({title:document.title,"
+         "textLen:(document.body?document.body.innerText.length:-1),"
+         "htmlLen:document.documentElement.outerHTML.length,"
+         "scripts:document.scripts.length})"
+        completionHandler:^(id result, NSError *error) {
+        DSHLog(@"页面状态 %@ %@", result ?: @"(nil)", error ? error.localizedDescription : @"");
+    }];
 }
 
 - (void)webView:(WKWebView *)webView didFailProvisionalNavigation:(WKNavigation *)navigation
