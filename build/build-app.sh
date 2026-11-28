@@ -68,16 +68,16 @@ LDFLAGS=(
     -framework Speech
 )
 
+# 最小外壳：只编「起内核 + 显示网页」必需的几个文件。
+#
+# 刻意不再编进来的（用户要求「啥额外功能都不要」）：
+#   DSHRootVC / DSHMenu / DSHBridge / DSHBrowserBridge /
+#   DSHBrowserControl / DSHVoice
+# 它们仍在仓库里，但不再参与构建。
 SOURCES=(
     "$SRC/main.m"
-    "$SRC/DSHAppDelegate.m"
-    "$SRC/DSHRootVC.m"
-    "$SRC/DSHBridge.m"
-    "$SRC/DSHMenu.m"
+    "$SRC/DSHApp.m"
     "$SRC/DSHShell.m"
-    "$SRC/DSHBrowserBridge.m"
-    "$SRC/DSHBrowserControl.m"
-    "$SRC/DSHVoice.m"
     "$SRC/DSHProc.m"
     "$SRC/DSHJIT.m"
 )
