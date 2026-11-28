@@ -110,7 +110,7 @@ static void DSHLog(NSString *fmt, ...) {
 
     WKWebViewConfiguration *cfg = [[WKWebViewConfiguration alloc] init];
     cfg.allowsInlineMediaPlayback = YES;
-    cfg.mediaTypesRequiringUserActionForPlayback = WKAudiovisualMediaNone;
+    cfg.mediaTypesRequiringUserActionForPlayback = WKAudiovisualMediaTypeNone;
     cfg.websiteDataStore = [WKWebsiteDataStore defaultDataStore];
 
     // 抓页面里的 JS 报错。
