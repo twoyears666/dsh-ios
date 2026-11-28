@@ -106,6 +106,12 @@ static void DSHLog(NSString *fmt, ...) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
+
+    // 记下系统版本 —— 判断前端兼容性全靠它
+    UIDevice *dev = [UIDevice currentDevice];
+    DSHLog(@"启动：iOS %@ / %@ / 外壳 %@",
+           dev.systemVersion, dev.model,
+           [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?");
     self.view.backgroundColor = [UIColor systemBackgroundColor];
 
     WKWebViewConfiguration *cfg = [[WKWebViewConfiguration alloc] init];

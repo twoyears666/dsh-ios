@@ -128,10 +128,17 @@ if (fs.existsSync(indexPath)) {
   let html = fs.readFileSync(indexPath, 'utf8');
   if (!html.includes('dsh-ios-polyfill')) {
     // Object.hasOwn 是 Safari 15.4+；老系统上补一个等价实现
+    // 老 WebKit 缺的几个小东西，补上成本极低、对老系统无害：
+    //   Object.hasOwn        Safari 15.4+
+    //   Array/String .at()   Safari 15.4+
     const polyfill =
       '<script id="dsh-ios-polyfill">' +
       'if(!Object.hasOwn){Object.hasOwn=function(o,k){' +
       'return Object.prototype.hasOwnProperty.call(o,k)}}' +
+      'if(!Array.prototype.at){Array.prototype.at=function(i){' +
+      'var n=this.length;var k=i<0?n+i:i;return (k<0||k>=n)?undefined:this[k]}}' +
+      'if(!String.prototype.at){String.prototype.at=function(i){' +
+      'var n=this.length;var k=i<0?n+i:i;return (k<0||k>=n)?undefined:this[k]}}' +
       '</script>';
     html = html.replace('<head>', '<head>\n    ' + polyfill);
     fs.writeFileSync(indexPath, html, 'utf8');
