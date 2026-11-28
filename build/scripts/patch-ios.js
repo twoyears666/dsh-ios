@@ -134,7 +134,7 @@ PATCHES.push({
 \t\t//      透传进来，remoteAddress 恒为 undefined，只看它的话永远 401。
 \t\tconst _ra = req.socket?.remoteAddress;
 \t\tif (_ra === "127.0.0.1" || _ra === "::1" || _ra === "::ffff:127.0.0.1") return true;
-\t\tconst _h = String(req.headers?.host ?? "").toLowerCase();
+\t\tconst _h = String(header(req.headers, "host") ?? "").toLowerCase();
 \t\tif (_h.startsWith("127.0.0.1") || _h.startsWith("localhost") || _h.startsWith("[::1]")) return true;
 \t\t/* v8 ignore next -- node:http always supplies url on server requests. */`,
   marker: 'dsh-iOS: 回环免 token。移植版是本机 WebView 外壳',
@@ -151,7 +151,7 @@ PATCHES.push({
 \t\t// 返回 browserPeer，等价于「浏览器带着有效 cookie 进来了」。
 \t\tconst _ra = request.socket?.remoteAddress;
 \t\tif (_ra === "127.0.0.1" || _ra === "::1" || _ra === "::ffff:127.0.0.1") return { peer: this.browserPeer };
-\t\tconst _h = String(request.headers?.host ?? "").toLowerCase();
+\t\tconst _h = String(header(request.headers, "host") ?? "").toLowerCase();
 \t\tif (_h.startsWith("127.0.0.1") || _h.startsWith("localhost") || _h.startsWith("[::1]")) return { peer: this.browserPeer };
 \t\tconst secure = this.owner.get("webServer")?.protocol === "https:";`,
   marker: 'dsh-iOS: 回环免 token（与 authorizeIndex 同一判据）',
@@ -204,6 +204,45 @@ PATCHES.push({
 \t\tawait this.findOppositeGenerationInDirectory(sessionDir(this.root, cwd, id));
 \t}`,
   marker: 'dsh-iOS: 同上 —— 存在旧格式会话文件时不再拒绝',
+  check: 'esm',
+});
+
+// ---------------------------------------------------------------- 8. token 落到文件
+// 内核的 launch token 是启动时随机生成的，只打印在 web.log 里。
+// App 想认证就得去日志里正则抓 —— 日志会被截断、轮转、多个实例时还会抓错。
+//
+// 让内核启动时把它写到 $DSH_CONFIG_DIR/web-token（0600），App 直接读文件。
+// token 仍然每次启动都换（不固定），只是多了一个稳定的取用通道。
+PATCHES.push({
+  name: 'launch token 写入文件',
+  file: '@deepseek-ai/dsh-client-connection/lib/index.js',
+  old: `import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";`,
+  new: `import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { writeFileSync as __dshWriteFileSync, mkdirSync as __dshMkdirSync } from "node:fs";`,
+  marker: '__dshWriteFileSync',
+  check: 'esm',
+});
+
+PATCHES.push({
+  name: 'launch token 写入文件（写入点）',
+  file: '@deepseek-ai/dsh-client-connection/lib/index.js',
+  old: `\tconst created = encodeBase64Url(randomBytes(SECRET_BYTES));
+\tPROCESS_LAUNCH_TOKENS.set(owner, created);
+\treturn created;`,
+  new: `\tconst created = encodeBase64Url(randomBytes(SECRET_BYTES));
+\tPROCESS_LAUNCH_TOKENS.set(owner, created);
+\t// dsh-iOS: 落到 $DSH_CONFIG_DIR/web-token，App 直接读文件，
+\t// 不用去 web.log 里正则抓（日志会截断/轮转，多实例还会抓错）。
+\ttry {
+\t\tconst __dir = process.env.DSH_CONFIG_DIR
+\t\t\t|| (process.env.DSH_ROOT ? process.env.DSH_ROOT + "/config" : "");
+\t\tif (__dir) {
+\t\t\t__dshMkdirSync(__dir, { recursive: true });
+\t\t\t__dshWriteFileSync(__dir + "/web-token", created + "\\n", { mode: 384 });
+\t\t}
+\t} catch {}
+\treturn created;`,
+  marker: 'dsh-iOS: 落到 $DSH_CONFIG_DIR/web-token',
   check: 'esm',
 });
 

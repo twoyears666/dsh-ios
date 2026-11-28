@@ -405,6 +405,19 @@ static void DSHLog(NSString *fmt, ...) {
 /// 从内核日志里抓 launch token（内核启动时会打印带 token 的 URL）。
 /// 取最后一个 —— 内核可能重启过多次，只有最新的有效。
 - (nullable NSString *)scrapeLaunchToken {
+    // 首选：内核启动时写下的 token 文件（.74+ 的补丁）。
+    // 比抓日志可靠 —— 日志会截断、轮转，多实例时还会抓到旧的。
+    NSString *tokenFile = [kDataRoot stringByAppendingPathComponent:@"config/web-token"];
+    NSString *fromFile = [NSString stringWithContentsOfFile:tokenFile
+                                                   encoding:NSUTF8StringEncoding error:NULL];
+    fromFile = [fromFile stringByTrimmingCharactersInSet:
+                [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (fromFile.length > 0) {
+        DSHLog(@"  token 来自文件 config/web-token");
+        return fromFile;
+    }
+
+    // 回退：从日志里正则抓（老版本内核没有写文件）
     NSString *p = [kDataRoot stringByAppendingPathComponent:@"logs/web.log"];
     NSString *text = [NSString stringWithContentsOfFile:p
                                                encoding:NSUTF8StringEncoding error:NULL];
