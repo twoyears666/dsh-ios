@@ -109,20 +109,16 @@ static void DSHLog(NSString *fmt, ...) {
 @property (nonatomic, assign) BOOL useProxy;
 @property (nonatomic, strong) DSHProxy *proxy;
 @property (nonatomic, assign) NSInteger nativeStatus;
+/// 内容进程重建次数（防止无限重建）
+@property (nonatomic, assign) NSInteger rebuildCount;
+/// webView 的约束，重建时要先解除
+@property (nonatomic, strong) NSArray<NSLayoutConstraint *> *webConstraints;
 @end
 
 @implementation DSHWebVC
 
-- (void)viewDidLoad {
-    [super viewDidLoad];
-
-    // 记下系统版本 —— 判断前端兼容性全靠它
-    UIDevice *dev = [UIDevice currentDevice];
-    DSHLog(@"启动：iOS %@ / %@ / 外壳 %@",
-           dev.systemVersion, dev.model,
-           [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?");
-    self.view.backgroundColor = [UIColor systemBackgroundColor];
-
+/// 创建 WebView（首次 + 内容进程被杀后重建都走这里）。
+- (void)setupWebView {
     WKWebViewConfiguration *cfg = [[WKWebViewConfiguration alloc] init];
     cfg.allowsInlineMediaPlayback = YES;
     cfg.mediaTypesRequiringUserActionForPlayback = WKAudiovisualMediaTypeNone;
@@ -218,7 +214,7 @@ static void DSHLog(NSString *fmt, ...) {
     [self.view addSubview:self.hint];
 
     UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
-    [NSLayoutConstraint activateConstraints:@[
+    NSArray<NSLayoutConstraint *> *cs = @[
         [self.web.topAnchor constraintEqualToAnchor:self.view.topAnchor],
         [self.web.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
         [self.web.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
@@ -228,12 +224,27 @@ static void DSHLog(NSString *fmt, ...) {
         [self.hint.centerYAnchor constraintEqualToAnchor:safe.centerYAnchor],
         [self.hint.leadingAnchor constraintGreaterThanOrEqualToAnchor:safe.leadingAnchor constant:24],
         [self.hint.trailingAnchor constraintLessThanOrEqualToAnchor:safe.trailingAnchor constant:-24],
-    ]];
+    ];
+    [NSLayoutConstraint activateConstraints:cs];
+    self.webConstraints = cs;
 
     // picker 需要 webView，所以放在 webView 创建之后
     self.picker = [[DSHPicker alloc] initWithPresenter:self webView:self.web];
     [cfg.userContentController addScriptMessageHandler:self.picker
                                                   name:[DSHPicker messageName]];
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+
+    // 记下系统版本 —— 判断前端兼容性全靠它
+    UIDevice *dev = [UIDevice currentDevice];
+    DSHLog(@"启动：iOS %@ / %@ / 外壳 %@",
+           dev.systemVersion, dev.model,
+           [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?");
+    self.view.backgroundColor = [UIColor systemBackgroundColor];
+
+    [self setupWebView];
 
     // 回前台重新做一次版本校验。
     // 装包时如果 App 进程还活着，viewDidLoad 不会重跑，
@@ -584,7 +595,98 @@ static void DSHLog(NSString *fmt, ...) {
 }
 
 - (void)webViewWebContentProcessDidTerminate:(WKWebView *)webView {
-    DSHLog(@"⚠ WebKit 内容进程被终止 —— 这就是页面空白/无回调的原因");
+    DSHLog(@"⚠ WebKit 内容进程被终止");
+    [self dumpWebContentCrash];
+
+    // 内容进程被杀（jetsam 内存不足最常见）后，标准恢复做法就是
+    // 重建 WKWebView —— 旧的那个内容进程已经死了，不会再恢复。
+    // 限制次数，避免「起不来→重建→又死」无限循环。
+    self.rebuildCount += 1;
+    if (self.rebuildCount > 3) {
+        DSHLog(@"内容进程连续终止 %ld 次，放弃自动重建", (long)self.rebuildCount);
+        return;
+    }
+    DSHLog(@"自动重建 WebView（第 %ld 次）", (long)self.rebuildCount);
+    // 稍等片刻，让系统回收掉旧进程再建新的
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self) return;
+        for (UIView *v in self.view.subviews) [v removeFromSuperview];
+        if (self.webConstraints.count) {
+            [NSLayoutConstraint deactivateConstraints:self.webConstraints];
+            self.webConstraints = nil;
+        }
+        self.web = nil;
+        self.finished = NO;
+        self.tries = 0;
+        [self setupWebView];
+        // 内核还在就直接重新加载，不用等轮询
+        if (DSHProbe()) {
+            [self nativeFetchThenLoad];
+        } else {
+            [self startKernel];
+        }
+    });
+}
+
+/// 扫 CrashReporter 目录，把最近的 WebContent / WebKit / LowMemory 日志
+/// 的关键行写进 minimal.log。
+/// 内容进程被杀的原因只有这里有 —— 是 jetsam(内存不足) 还是代码签名失败，
+/// 决定了下一步该「省内存」还是「换签名」。
+- (void)dumpWebContentCrash {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSArray<NSString *> *dirs = @[
+        @"/var/mobile/Library/Logs/CrashReporter",
+        @"/private/var/mobile/Library/Logs/CrashReporter",
+    ];
+    NSMutableArray *cands = [NSMutableArray array];
+    for (NSString *dir in dirs) {
+        NSArray *files = [fm contentsOfDirectoryAtPath:dir error:NULL];
+        for (NSString *f in files ?: @[]) {
+            NSString *lf = [f lowercaseString];
+            BOOL hit = [lf hasPrefix:@"webcontent"] ||
+                       [lf hasPrefix:@"com.apple.webkit"] ||
+                       [lf hasPrefix:@"lowmemory"] ||
+                       [lf hasPrefix:@"webcontent~"];
+            if (!hit) continue;
+            NSString *full = [dir stringByAppendingPathComponent:f];
+            NSDictionary *a = [fm attributesOfItemAtPath:full error:NULL];
+            NSDate *d = a[NSFileModificationDate] ?: [NSDate distantPast];
+            // 只要最近 15 分钟的
+            if (-[d timeIntervalSinceNow] > 900) continue;
+            [cands addObject:@{ @"p": full, @"d": d }];
+        }
+    }
+    [cands sortUsingDescriptors:@[
+        [NSSortDescriptor sortDescriptorWithKey:@"d" ascending:NO]]];
+    if (cands.count == 0) {
+        DSHLog(@"  最近没有 WebContent 崩溃日志（可能是被 jetsam 静默杀掉）");
+        return;
+    }
+    NSUInteger n = MIN((NSUInteger)2, cands.count);
+    for (NSUInteger k = 0; k < n; k++) {
+        NSString *path = cands[k][@"p"];
+        NSData *data = [NSData dataWithContentsOfFile:path];
+        if (data.length == 0) continue;
+        NSString *text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+        if (text.length == 0)
+            text = [[NSString alloc] initWithData:data encoding:NSASCIIStringEncoding];
+        DSHLog(@"  崩溃日志 %@（%lu 字节）",
+               [path lastPathComponent], (unsigned long)data.length);
+        // 提取关键字段（.ips 是 JSON，一行很长，取关键词附近的片段）
+        for (NSString *key in @[ @"Exception Type", @"Termination Reason",
+                                 @"jetsam", @"crashReporterKey", @"Exception Code" ]) {
+            NSRange r = [text rangeOfString:key options:NSCaseInsensitiveSearch];
+            if (r.location == NSNotFound) continue;
+            NSUInteger a = r.location;
+            NSUInteger b = MIN(text.length, r.location + 200);
+            NSString *snip = [text substringWithRange:NSMakeRange(a, b - a)];
+            snip = [snip stringByReplacingOccurrencesOfString:@"\n" withString:@" "];
+            DSHLog(@"    [%@] %@", key, snip);
+        }
+    }
 }
 
 - (void)webView:(WKWebView *)webView didStartProvisionalNavigation:(WKNavigation *)navigation {
