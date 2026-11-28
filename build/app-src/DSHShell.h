@@ -34,6 +34,17 @@ NS_ASSUME_NONNULL_BEGIN
                  env:(nullable NSDictionary<NSString *, NSString *> *)extraEnv
                  pid:(nullable pid_t *)pidOut;
 
+/// 同上，但可以让子进程**暂停着**创建出来（POSIX_SPAWN_START_SUSPENDED）。
+///
+/// 用途：越狱的 JIT 接口要求在目标进程开始执行 JIT 代码之前调用。
+/// 所以先 suspend 起来 → 给它的 pid 开 JIT → 再 SIGCONT 让它跑。
++ (int)spawnDetached:(NSString *)path
+                args:(nullable NSArray<NSString *> *)args
+             logPath:(nullable NSString *)logPath
+                 env:(nullable NSDictionary<NSString *, NSString *> *)extraEnv
+           suspended:(BOOL)suspended
+                 pid:(nullable pid_t *)pidOut;
+
 /// 同步执行命令，返回合并的 stdout+stderr。
 /// @param path 可执行文件绝对路径（如 /var/jb/usr/bin/dsh-doctor）
 /// @param args 参数数组（不含 argv[0]）

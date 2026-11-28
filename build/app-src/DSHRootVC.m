@@ -24,6 +24,8 @@
 #import "DSHBrowserControl.h"
 #import "DSHVoice.h"
 #import "DSHProc.h"
+#import "DSHJIT.h"
+#import <sys/wait.h>
 
 // POSIX socket：用于内核存活探测（DSHProbeKernel）
 #import <sys/socket.h>
@@ -298,6 +300,8 @@ static void DSHAppLog(NSString *fmt, ...) {
 - (void)showTierPicker;
 - (void)applyTier:(NSString *)tier;
 - (NSString *)probeBestTier;
+- (void)enableJITForPid:(pid_t)pid;
+- (int)runNodeWithJIT:(NSString *)node args:(NSArray<NSString *> *)args timeout:(NSTimeInterval)timeout;
 - (nullable NSString *)effectiveTierName;
 - (nullable NSString *)bundledNodePath;
 - (void)handleProbeResult:(BOOL)up;
@@ -357,6 +361,7 @@ static void DSHAppLog(NSString *fmt, ...) {
     self.doctorPath = [DSHShell resolveJailbreakPath:@"usr/bin/dsh-doctor" diagnostics:diag];
     self.nodePath   = [DSHShell resolveJailbreakPath:@"usr/lib/dsh/bin/node" diagnostics:diag];
     DSHAppLog(@"=== 工具解析 ===\n%@", diag);
+    DSHAppLog(@"=== JIT 接口 ===\n%@", [DSHJIT diagnostics]);
     DSHAppLog(@"选中 dsh=%@ ctl=%@ node=%@", self.dshPath, self.ctlPath, self.nodePath);
 
     self.menu = [[DSHMenu alloc] init];
@@ -803,10 +808,14 @@ static NSString *const kDSHDataRoot = @"/var/mobile/Media/deepseek-harness";
 
     pid_t pid = 0;
 
-    // 方式 1：直接 exec node
-    int rc = [DSHShell spawnDetached:node args:args logPath:logPath env:env pid:&pid];
-    DSHAppLog(@"  方式1 直接 exec node → rc=%d pid=%d", rc, pid);
+    // 方式 1：直接 exec node，**暂停着创建**，先向越狱要 JIT 再让它跑
+    int rc = [DSHShell spawnDetached:node args:args logPath:logPath env:env
+                           suspended:YES pid:&pid];
+    DSHAppLog(@"  方式1 直接 exec node → rc=%d pid=%d（暂停创建）", rc, pid);
     if (rc == 0) {
+        [self enableJITForPid:pid];
+        kill(pid, SIGCONT);          // 不管 JIT 成没成都要放行，否则子进程永远挂着
+        DSHAppLog(@"  已 SIGCONT pid=%d", pid);
         [self recordKernelPid:pid];
         return 0;
     }
@@ -859,6 +868,47 @@ static NSString *const kDSHDataRoot = @"/var/mobile/Media/deepseek-harness";
 /// V8 后台线程写可执行页 → SIGBUS。代价是性能低、WASM 不可用。
 ///
 /// 这里允许手动覆盖（写 config/tier），或者清掉缓存让它重新探测。
+/// 给子进程请求 JIT。日志里写清楚成功与否 —— 这决定了能跑哪一档。
+- (void)enableJITForPid:(pid_t)pid {
+    if (pid <= 0) return;
+    BOOL ok = [DSHJIT enableForPid:pid];
+    DSHAppLog(@"  为 pid %d 请求 JIT → %@", pid,
+              ok ? @"成功" : @"失败（这一档会退化成 jitless 行为）");
+}
+
+/// 跑一次 node（带 JIT），返回退出码。用于档位探测。
+///
+/// 探测也必须带 JIT —— 否则 native/single 这些档永远测不过，
+/// 结果就是永远选中 nowasm（真机上就是这么被坑的）。
+- (int)runNodeWithJIT:(NSString *)node args:(NSArray<NSString *> *)args timeout:(NSTimeInterval)timeout {
+    NSString *logPath = [kDSHDataRoot stringByAppendingPathComponent:@"logs/tier-probe.log"];
+    pid_t pid = 0;
+    int rc = [DSHShell spawnDetached:node args:args logPath:logPath
+                                 env:[self kernelEnvironment] suspended:YES pid:&pid];
+    if (rc != 0 || pid <= 0) return -1;
+
+    [self enableJITForPid:pid];
+    kill(pid, SIGCONT);
+
+    int status = 0;
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:timeout];
+    while ([deadline timeIntervalSinceNow] > 0) {
+        pid_t w = waitpid(pid, &status, WNOHANG);
+        if (w == pid) {
+            if (WIFEXITED(status)) return WEXITSTATUS(status);
+            if (WIFSIGNALED(status)) {
+                DSHAppLog(@"    子进程被信号 %d 杀死", WTERMSIG(status));
+                return -1;
+            }
+            return -1;
+        }
+        usleep(200 * 1000);
+    }
+    // 超时：杀掉
+    kill(pid, SIGKILL);
+    return -1;
+}
+
 /// 逐档真跑 smoke.js，选第一个能过的。
 ///
 /// 这就是 tier.sh 在命令行里做的事。之前 App 只读缓存、从不探测，
@@ -878,15 +928,7 @@ static NSString *const kDSHDataRoot = @"/var/mobile/Media/deepseek-harness";
         NSMutableArray *args = [NSMutableArray arrayWithArray:[self tierArgsForName:t]];
         [args addObject:smoke];
 
-        __block int rc = -1;
-        dispatch_semaphore_t sem = dispatch_semaphore_create(0);
-        [DSHShell runAsync:node args:args timeout:25 completion:^(NSString *out, int status) {
-            rc = status;
-            dispatch_semaphore_signal(sem);
-        }];
-        dispatch_semaphore_wait(sem,
-            dispatch_time(DISPATCH_TIME_NOW, (int64_t)(30 * NSEC_PER_SEC)));
-
+        int rc = [self runNodeWithJIT:node args:args timeout:30];
         DSHAppLog(@"  档位 %@ → rc=%d", t, rc);
         if (rc == 0) {
             DSHAppLog(@"  选中 %@", t);

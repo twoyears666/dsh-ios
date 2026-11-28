@@ -182,6 +182,16 @@ extern char **environ;
              logPath:(NSString *)logPath
                  env:(NSDictionary<NSString *, NSString *> *)extraEnv
                  pid:(pid_t *)pidOut {
+  return [self spawnDetached:path args:args logPath:logPath env:extraEnv
+                   suspended:NO pid:pidOut];
+}
+
++ (int)spawnDetached:(NSString *)path
+                args:(NSArray<NSString *> *)args
+             logPath:(NSString *)logPath
+                 env:(NSDictionary<NSString *, NSString *> *)extraEnv
+           suspended:(BOOL)suspended
+                 pid:(pid_t *)pidOut {
   if (path.length == 0) return EINVAL;
 
   // argv
@@ -226,6 +236,8 @@ extern char **environ;
   posix_spawnattr_t attr;
   posix_spawnattr_init(&attr);
   short flags = POSIX_SPAWN_SETSID;
+  // 让子进程暂停着创建，好在我们控制的时间点给它开 JIT
+  if (suspended) flags |= POSIX_SPAWN_START_SUSPENDED;
   posix_spawnattr_setflags(&attr, flags);
 
   // ---- 构造 envp：当前 environ + 覆盖项 ----
