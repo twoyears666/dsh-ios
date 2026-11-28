@@ -256,10 +256,42 @@ static void DSHLog(NSString *fmt, ...) {
         });
     }];
 
+    [self webViewSelfTest];
+
     [self startKernel];
 }
 
 #pragma mark 起内核
+
+/// WebView 自检。
+///
+/// 真机上出现过「loadRequest 之后什么回调都没有」：没有 didStart、
+/// 没有 didFail、isLoading 一直是 0。这种情况要先把「WebKit 渲染管线
+/// 本身是否可用」和「网络/认证是否可用」分开，否则会一直往错误方向查。
+///
+/// 做法：loadHTMLString 一个最小页面，再 evaluateJavaScript 读回来。
+/// 能读回来 = 内容进程活着；读不回来 = 渲染管线根本没起来。
+- (void)webViewSelfTest {
+    NSString *html = @"<html><body><h1 id=\"t\">dsh-ok</h1></body></html>";
+    [self.web loadHTMLString:html baseURL:nil];
+
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self) return;
+        [self.web evaluateJavaScript:@"document.getElementById('t') ? document.getElementById('t').textContent : 'nil'"
+                   completionHandler:^(id result, NSError *error) {
+            if (error != nil) {
+                DSHLog(@"⚠ WebView 自检失败：%@ —— 渲染管线没起来，加载网页无意义", error.localizedDescription);
+                return;
+            }
+            DSHLog(@"WebView 自检：%@（读回 %@）",
+                   [@"dsh-ok" isEqualToString:[result description]] ? @"通过" : @"异常",
+                   result ?: @"nil");
+        }];
+    });
+}
 
 /// 当前装的版本（deb payload 里的 VERSION 戳）
 - (nullable NSString *)installedVersion {
@@ -549,6 +581,10 @@ static void DSHLog(NSString *fmt, ...) {
 - (void)userContentController:(WKUserContentController *)ucc
       didReceiveScriptMessage:(WKScriptMessage *)message {
     DSHLog(@"页面报错 %@", message.body);
+}
+
+- (void)webViewWebContentProcessDidTerminate:(WKWebView *)webView {
+    DSHLog(@"⚠ WebKit 内容进程被终止 —— 这就是页面空白/无回调的原因");
 }
 
 - (void)webView:(WKWebView *)webView didStartProvisionalNavigation:(WKNavigation *)navigation {
