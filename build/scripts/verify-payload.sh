@@ -271,7 +271,11 @@ done
 
 # ---------------------------------------------------------------- 4. plist
 head1 '4. launchd plist'
-PLISTS=$(find "$PAYLOAD" -type f -name '*.plist' 2>/dev/null)
+# 只校验 launchd plist（LaunchDaemons / LaunchAgents 下的）。
+# Web Clip 的 Info.plist（usr/lib/dsh/webclip/）不是 launchd plist，
+# 它没有 Label/ProgramArguments/RunAtLoad —— 用它当 launchd 校验会误报。
+PLISTS=$(find "$PAYLOAD" -type f -name '*.plist' 2>/dev/null \
+         | grep -E '/Library/Launch(Agents|Daemons)/' || true)
 if [ -z "$PLISTS" ]; then
     # 内核改由 App 直接拉起之后，就不再需要 launchd plist 了。
     # 但要确认 postinst 会把老版本残留的 plist 清掉，否则将来 launchd
