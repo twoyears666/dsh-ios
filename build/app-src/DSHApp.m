@@ -102,6 +102,8 @@ static void DSHLog(NSString *fmt, ...) {
 @property (nonatomic, strong) UILabel *hint;
 @property (nonatomic, assign) NSInteger tries;
 @property (nonatomic, strong) DSHPicker *picker;
+/// 主文档是否已经加载完成（用于 15 秒看门狗）
+@property (nonatomic, assign) BOOL finished;
 @end
 
 @implementation DSHWebVC
@@ -145,6 +147,36 @@ static void DSHLog(NSString *fmt, ...) {
                             forMainFrameOnly:NO]];
     [cfg.userContentController addScriptMessageHandler:(id<WKScriptMessageHandler>)self
                                                   name:@"dsherr"];
+
+    // Electron preload 的 7 个 API，影响使用的都补回来。
+    //
+    // 能同步的（版本 / 平台 / 路径 / 语言 / 引导状态）直接在脚本里给常量，
+    // 不来回发消息；只有 ready/failed/quit 需要通知原生，复用 dsherr 通道。
+    NSString *ver = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"0.0.0";
+    NSString *bridge =
+        [NSString stringWithFormat:
+         @"(function(){"
+          "var root='%@';"
+          "var paths={home:'/var/mobile',userData:root+'/data',temp:root+'/cache/tmp',"
+          "documents:root+'/workspaces',logs:root+'/logs'};"
+          "function post(m){try{window.webkit.messageHandlers.dsherr.postMessage('bridge: '+m);}catch(e){}}"
+          "window.__DSH_HOST_PATHS__={pathFor:function(k){return paths[k]||root}};"
+          "window.__DSH_LOCALE__={read:function(){return 'zh-CN'},onChange:function(){return function(){}}};"
+          "window.dshOnboarding={hasApiKey:function(){return true},setActive:function(){}};"
+          "window.dshDesktop={app:{"
+          "getVersion:function(){return '%@'},"
+          "getPlatform:function(){return 'ios'},"
+          "getPath:function(k){return paths[k]||root},"
+          "quit:function(){post('quit')}}};"
+          "window.dshPlatform={open:function(){},close:function(){post('close')},setBounds:function(){}};"
+          "window.dshDesktopBoot={"
+          "ready:function(){post('ready')},"
+          "failed:function(e){post('failed: '+(e&&e.message||e))}};"
+          "})();", kDataRoot, ver];
+    [cfg.userContentController addUserScript:
+        [[WKUserScript alloc] initWithSource:bridge
+                               injectionTime:WKUserScriptInjectionTimeAtDocumentStart
+                            forMainFrameOnly:YES]];
 
     // 唯一保留的 bridge API：目录选择器（「增加工作区」要用）
     [cfg.userContentController addUserScript:
@@ -317,7 +349,7 @@ static void DSHLog(NSString *fmt, ...) {
     if (DSHProbe()) {
         DSHLog(@"内核就绪（第 %ld 次探测），加载网页", (long)self.tries);
         self.hint.hidden = YES;
-        [self load];
+        [self nativeFetchThenLoad];
         return;
     }
     if (self.tries > 120) {          // ~3 分钟
@@ -332,6 +364,29 @@ static void DSHLog(NSString *fmt, ...) {
                    dispatch_get_main_queue(), ^{ [self poll]; });
 }
 
+/// 用 NSURLSession 自己取一次。
+/// 目的：把「服务端是否响应 App 进程」和「WKWebView 是否响应」分开。
+/// 如果这里 200、WKWebView 却收不到响应头，那就是 WebKit 那条链路的问题。
+- (void)nativeFetchThenLoad {
+    NSURL *url = [NSURL URLWithString:[NSString stringWithFormat:@"http://127.0.0.1:%@/", kPort]];
+    NSURLSessionConfiguration *c = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+    c.timeoutIntervalForRequest = 8;
+    NSURLSession *s = [NSURLSession sessionWithConfiguration:c];
+    [[s dataTaskWithURL:url completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+        NSInteger code = [resp isKindOfClass:[NSHTTPURLResponse class]]
+                       ? ((NSHTTPURLResponse *)resp).statusCode : -1;
+        DSHLog(@"原生 GET / → HTTP %ld, %lu 字节, err=%@",
+               (long)code, (unsigned long)data.length, err.localizedDescription ?: @"无");
+        if (data.length > 0) {
+            NSString *body = [[NSString alloc] initWithData:
+                              [data subdataWithRange:NSMakeRange(0, MIN((NSUInteger)200, data.length))]
+                                                   encoding:NSUTF8StringEncoding];
+            DSHLog(@"  响应前 200 字节: %@", [body stringByReplacingOccurrencesOfString:@"\n" withString:@" "]);
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{ [self load]; });
+    }] resume];
+}
+
 - (void)load {
     NSURL *url = [NSURL URLWithString:
                   [NSString stringWithFormat:@"http://127.0.0.1:%@/", kPort]];
@@ -339,6 +394,30 @@ static void DSHLog(NSString *fmt, ...) {
     [self.web loadRequest:[NSURLRequest requestWithURL:url
                                            cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
                                        timeoutInterval:30]];
+
+    // 看门狗：WKWebView 有时候既不给 didFinish 也不给 didFail，
+    // 就这么一直白着。15 秒还没完成就把状态画在页面上，别让人干等。
+    self.finished = NO;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(15 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (self.finished) return;
+        DSHLog(@"⚠ 15 秒仍未完成（isLoading=%d），显示诊断页", self.web.isLoading);
+        [self showDiagnosticPage];
+    });
+}
+
+- (void)showDiagnosticPage {
+    NSString *html = [NSString stringWithFormat:
+        @"<!doctype html><meta name=viewport content='width=device-width'>"
+         "<body style='font:16px -apple-system;padding:24px;line-height:1.7'>"
+         "<h3>页面没有加载出来</h3>"
+         "<p>内核在监听 <code>127.0.0.1:%@</code>，但这个 WebView 收不到响应。</p>"
+         "<p>WebView isLoading = %d</p>"
+         "<p>可能原因：WKWebView 的网络进程访问不了回环地址。</p>"
+         "<p><button onclick=\"location.href='http://127.0.0.1:%@/'\" "
+         "style='font-size:16px;padding:10px 18px'>重试</button></p>"
+         "</body>", kPort, self.web.isLoading, kPort];
+    [self.web loadHTMLString:html baseURL:nil];
 }
 
 #pragma mark WKNavigationDelegate
@@ -348,7 +427,21 @@ static void DSHLog(NSString *fmt, ...) {
     DSHLog(@"页面报错 %@", message.body);
 }
 
+- (void)webView:(WKWebView *)webView didStartProvisionalNavigation:(WKNavigation *)navigation {
+    DSHLog(@"开始请求：%@", webView.URL.absoluteString);
+}
+
+- (void)webView:(WKWebView *)webView didCommitNavigation:(WKNavigation *)navigation {
+    DSHLog(@"收到响应，开始渲染");
+}
+
+- (void)webView:(WKWebView *)webView didFailNavigation:(WKNavigation *)navigation
+      withError:(NSError *)error {
+    DSHLog(@"加载失败(didFail)：%@ (%@)", error.localizedDescription, @(error.code));
+}
+
 - (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
+    self.finished = YES;
     DSHLog(@"页面加载完成：%@", webView.URL.absoluteString);
     // 白屏时最需要知道的两件事：标题有没有、正文有多长
     [webView evaluateJavaScript:
