@@ -71,6 +71,20 @@ static BOOL DSHProbe(void) {
 
 #pragma mark - 日志
 
+/// 每次启动都清空 minimal.log，只写本次启动的日志。
+///
+/// 原因：之前是追加写，用户打包时总是拿到上一次的旧内容
+/// （三个 zip 的 minimal.log 完全相同，全是 .78 的日志），
+/// 根本分不清装的新版本有没有生效。清空后，文件里一定有完整版本号
+/// 和本次启动的全过程，不会再混淆。
+static void DSHResetLog(void) {
+    NSString *path = [kDataRoot stringByAppendingPathComponent:@"logs/minimal.log"];
+    [[NSFileManager defaultManager] createDirectoryAtPath:
+        [path stringByDeletingLastPathComponent]
+                 withIntermediateDirectories:YES attributes:nil error:NULL];
+    [@"" writeToFile:path atomically:NO encoding:NSUTF8StringEncoding error:NULL];
+}
+
 static void DSHLog(NSString *fmt, ...) {
     static NSDateFormatter *df = nil;
     static dispatch_once_t once;
@@ -237,11 +251,15 @@ static void DSHLog(NSString *fmt, ...) {
 - (void)viewDidLoad {
     [super viewDidLoad];
 
+    DSHResetLog();   // 本次启动写全新的日志，避免拿到旧内容
+
     // 记下系统版本 —— 判断前端兼容性全靠它
     UIDevice *dev = [UIDevice currentDevice];
-    DSHLog(@"启动：iOS %@ / %@ / 外壳 %@",
+    DSHLog(@"========== 本次启动 ==========");
+    DSHLog(@"启动：iOS %@ / %@ / 外壳 %@ (build %@)",
            dev.systemVersion, dev.model,
-           [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?");
+           [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?",
+           [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"?");
     self.view.backgroundColor = [UIColor systemBackgroundColor];
 
     [self setupWebView];
