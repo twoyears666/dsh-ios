@@ -265,6 +265,9 @@ static NSInteger DSHProbeStatus(void) {
     NSInteger code = DSHProbeStatus();
     DSHLog(@"探测 #%ld → HTTP %ld", (long)self.tries, (long)code);
     if (code >= 200 && code < 400) {
+        // 优先用 Reynard（Gecko 内核，全屏无顶栏）—— 用户实测它能加载 dsh 页面。
+        // 没装才退回 SFSafariViewController。
+        if ([self openInReynard]) return;
         DSHLog(@"内核就绪，present SFSafariViewController");
         [self presentSafari];
         return;
@@ -278,6 +281,35 @@ static NSInteger DSHProbeStatus(void) {
         @"正在启动内核…（HTTP %ld，%ld 秒）", (long)code, (long)self.tries];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{ [self poll]; });
+}
+
+/// 用 Reynard（Gecko 内核浏览器）打开页面。
+/// 它注册了 reynard:// scheme 和 http/https，通过
+/// reynard://open?url=<encoded> 可以把任意 URL 甩给它，
+/// 在它自己的 Gecko 进程里全屏渲染 —— 绕开我们 App 起不了 WebContent 的问题。
+/// 返回 YES 表示成功唤起。
+- (BOOL)openInReynard {
+    NSString *page = [NSString stringWithFormat:
+        @"http://127.0.0.1:%@/?token=%@", kPort, kWebToken];
+    NSURL *reynardURL = [NSURL URLWithString:
+        [NSString stringWithFormat:@"reynard://open?url=%@",
+            [page stringByAddingPercentEncodingWithAllowedCharacters:
+                [NSCharacterSet URLQueryAllowedCharacterSet]]]];
+
+    UIApplication *app = [UIApplication sharedApplication];
+    if (![app canOpenURL:reynardURL]) {
+        DSHLog(@"Reynard 未安装（canOpenURL=NO），走 Safari 兜底");
+        return NO;
+    }
+    DSHLog(@"唤起 Reynard: %@", reynardURL.absoluteString);
+    if (@available(iOS 10.0, *)) {
+        [app openURL:reynardURL options:@{} completionHandler:^(BOOL ok) {
+            DSHLog(@"Reynard openURL 结果: %@", ok ? @"成功" : @"失败");
+        }];
+    } else {
+        [app openURL:reynardURL];
+    }
+    return YES;
 }
 
 - (void)presentSafari {
