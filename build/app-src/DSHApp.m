@@ -235,6 +235,27 @@ static void DSHLog(NSString *fmt, ...) {
     [cfg.userContentController addScriptMessageHandler:self.picker
                                                   name:[DSHPicker messageName]];
 
+    // 回前台重新做一次版本校验。
+    // 装包时如果 App 进程还活着，viewDidLoad 不会重跑，
+    // 版本校验也就没机会执行 —— 结果就是「装了新包但内核还是旧的」。
+    [[NSNotificationCenter defaultCenter]
+        addObserverForName:UIApplicationWillEnterForegroundNotification
+                    object:nil queue:[NSOperationQueue mainQueue]
+                usingBlock:^(NSNotification *n) {
+        __weak typeof(self) weakSelf = self;
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            __strong typeof(weakSelf) self = weakSelf;
+            if (!self) return;
+            NSString *installed = [self installedVersion];
+            NSString *running = [DSHProc recordedKernelVersion];
+            if (installed.length > 0 && running.length > 0
+                && ![running isEqualToString:installed]) {
+                DSHLog(@"回前台发现版本不一致（跑 %@ / 装 %@），重开内核", running, installed);
+                dispatch_async(dispatch_get_main_queue(), ^{ [self startKernel]; });
+            }
+        });
+    }];
+
     [self startKernel];
 }
 
@@ -381,6 +402,28 @@ static void DSHLog(NSString *fmt, ...) {
                    dispatch_get_main_queue(), ^{ [self poll]; });
 }
 
+/// 从内核日志里抓 launch token（内核启动时会打印带 token 的 URL）。
+/// 取最后一个 —— 内核可能重启过多次，只有最新的有效。
+- (nullable NSString *)scrapeLaunchToken {
+    NSString *p = [kDataRoot stringByAppendingPathComponent:@"logs/web.log"];
+    NSString *text = [NSString stringWithContentsOfFile:p
+                                               encoding:NSUTF8StringEncoding error:NULL];
+    if (text.length == 0) return nil;
+    NSRange r = [text rangeOfString:@"token=" options:NSBackwardsSearch];
+    if (r.location == NSNotFound) return nil;
+    NSUInteger i = r.location + r.length;
+    NSMutableString *out = [NSMutableString string];
+    while (i < text.length) {
+        unichar c = [text characterAtIndex:i];
+        BOOL ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+               || (c >= '0' && c <= '9') || c == '-' || c == '_';
+        if (!ok) break;
+        [out appendFormat:@"%C", c];
+        i++;
+    }
+    return out.length > 0 ? out : nil;
+}
+
 /// 用 NSURLSession 自己取一次。
 /// 目的：把「服务端是否响应 App 进程」和「WKWebView 是否响应」分开。
 /// 如果这里 200、WKWebView 却收不到响应头，那就是 WebKit 那条链路的问题。
@@ -400,6 +443,21 @@ static void DSHLog(NSString *fmt, ...) {
                               [data subdataWithRange:NSMakeRange(0, MIN((NSUInteger)200, data.length))]
                                                    encoding:NSUTF8StringEncoding];
             DSHLog(@"  响应前 200 字节: %@", [body stringByReplacingOccurrencesOfString:@"\n" withString:@" "]);
+        }
+
+        // 401 → 走保底路径：从 web.log 抓 launch token，用它换一次 cookie。
+        // token 认证是内核的正常流程（老外壳就是这么进去的），
+        // 不依赖「回环免 token」补丁是否生效。
+        if (code == 401) {
+            NSString *token = [self scrapeLaunchToken];
+            if (token.length > 0) {
+                DSHLog(@"401：抓到 launch token，用它换 cookie");
+                [self.proxy primeWithToken:token completion:^(NSInteger st, BOOL ok) {
+                    dispatch_async(dispatch_get_main_queue(), ^{ [self load]; });
+                }];
+                return;
+            }
+            DSHLog(@"401：web.log 里没抓到 token —— 内核可能还没打印，或日志被截断");
         }
         dispatch_async(dispatch_get_main_queue(), ^{ [self load]; });
     }] resume];

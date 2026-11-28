@@ -36,6 +36,30 @@
     return [NSString stringWithFormat:@"%p", task];
 }
 
+- (void)primeWithToken:(NSString *)token
+            completion:(void (^)(NSInteger, BOOL))completion {
+    if (token.length == 0) { completion(-1, NO); return; }
+    NSString *u = [NSString stringWithFormat:
+                   @"http://127.0.0.1:%ld/?token=%@", (long)self.port, token];
+    NSURLRequest *req = [NSURLRequest requestWithURL:[NSURL URLWithString:u]
+                                         cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
+                                     timeoutInterval:10];
+    // NSURLSession 会自动跟随 303 并把 Set-Cookie 存进自己的 cookie 存储，
+    // 之后转发请求就带上了 —— 这正是我们要的。
+    [[self.session dataTaskWithRequest:req
+                    completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+        NSInteger code = [resp isKindOfClass:[NSHTTPURLResponse class]]
+                       ? ((NSHTTPURLResponse *)resp).statusCode : -1;
+        BOOL ok = (err == nil && code >= 200 && code < 400);
+        if (self.onLog) {
+            self.onLog([NSString stringWithFormat:
+                        @"token 换 cookie → HTTP %ld %@", (long)code,
+                        err ? err.localizedDescription : (ok ? @"成功" : @"失败")]);
+        }
+        completion(code, ok);
+    }] resume];
+}
+
 #pragma mark - WKURLSchemeHandler
 
 - (void)webView:(WKWebView *)webView startURLSchemeTask:(id<WKURLSchemeTask>)task {

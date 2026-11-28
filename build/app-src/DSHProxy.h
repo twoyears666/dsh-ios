@@ -36,6 +36,13 @@ NS_ASSUME_NONNULL_BEGIN
 /// 日志回调（由外壳接到 minimal.log）
 @property (nonatomic, copy, nullable) void (^onLog)(NSString *line);
 
+/// 用 launch token 换一次 cookie，换到的 cookie 存在本代理自己的
+/// NSURLSession 里，之后所有转发请求会自动带上。
+/// 这是「回环免 token 补丁失效」时的保底路径 —— token 认证是内核的
+/// 正常流程，老外壳就是靠它进去的。
+- (void)primeWithToken:(NSString *)token
+            completion:(void (^)(NSInteger status, BOOL ok))completion;
+
 @end
 
 NS_ASSUME_NONNULL_END
