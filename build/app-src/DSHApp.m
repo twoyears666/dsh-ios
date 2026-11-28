@@ -136,7 +136,12 @@ static void DSHLog(NSString *fmt, ...) {
     WKWebViewConfiguration *cfg = [[WKWebViewConfiguration alloc] init];
     cfg.allowsInlineMediaPlayback = YES;
     cfg.mediaTypesRequiringUserActionForPlayback = WKAudiovisualMediaTypeNone;
-    cfg.websiteDataStore = [WKWebsiteDataStore defaultDataStore];
+    // 非持久化 DataStore：越狱 App 装在 /var/jb 下，
+    // 持久化 WebsiteDataStore 要在容器里建目录写缓存/cookie，
+    // 这个路径可能不可写 → 内容进程一起就崩。
+    // 非持久化只存内存，不碰磁盘，能绕开这类崩溃。
+    // 代价：cookie/localStorage 不跨启动保留（我们的认证走 token 文件，不依赖它）。
+    cfg.websiteDataStore = [WKWebsiteDataStore nonPersistentDataStore];
 
     // 抓页面里的 JS 报错。
     //
@@ -301,23 +306,47 @@ static void DSHLog(NSString *fmt, ...) {
 /// 做法：loadHTMLString 一个最小页面，再 evaluateJavaScript 读回来。
 /// 能读回来 = 内容进程活着；读不回来 = 渲染管线根本没起来。
 - (void)webViewSelfTest {
+    // 分级自检：先纯 HTML，再加简单 JS，最后大 JS。
+    // 用户反馈「闪一下 dsh-ok 又暴毙」—— 说明纯 HTML 能渲染，
+    // 但加载真实页面（大量 JS）时内容进程死。分级能定位死在哪一步。
     NSString *html = @"<html><body><h1 id=\"t\">dsh-ok</h1></body></html>";
     [self.web loadHTMLString:html baseURL:nil];
+    DSHLog(@"自检 1/3：纯 HTML 已加载");
 
     __weak typeof(self) weakSelf = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         __strong typeof(weakSelf) self = weakSelf;
         if (!self) return;
+
+        // 第一级：读回 DOM
         [self.web evaluateJavaScript:@"document.getElementById('t') ? document.getElementById('t').textContent : 'nil'"
                    completionHandler:^(id result, NSError *error) {
             if (error != nil) {
-                DSHLog(@"⚠ WebView 自检失败：%@ —— 渲染管线没起来，加载网页无意义", error.localizedDescription);
+                DSHLog(@"⚠ 自检 1/3 失败（纯 HTML 读回）：%@", error.localizedDescription);
                 return;
             }
-            DSHLog(@"WebView 自检：%@（读回 %@）",
-                   [@"dsh-ok" isEqualToString:[result description]] ? @"通过" : @"异常",
-                   result ?: @"nil");
+            DSHLog(@"自检 1/3 通过：读回 %@", result ?: @"nil");
+
+            // 第二级：简单 JS（会走 JIT 编译）
+            [self.web evaluateJavaScript:@"(function(){var s=0;for(var i=0;i<10000;i++)s+=i;return s;})()"
+                       completionHandler:^(id r2, NSError *e2) {
+                if (e2 != nil) {
+                    DSHLog(@"⚠ 自检 2/3 失败（简单 JS / JIT）：%@", e2.localizedDescription);
+                    return;
+                }
+                DSHLog(@"自检 2/3 通过：JS 循环结果 %@", r2 ?: @"nil");
+
+                // 第三级：分配一块内存，看内容进程会不会被 jetsam
+                [self.web evaluateJavaScript:@"(function(){var a=[];for(var i=0;i<200000;i++)a.push('x'+i);return a.length;})()"
+                           completionHandler:^(id r3, NSError *e3) {
+                    if (e3 != nil) {
+                        DSHLog(@"⚠ 自检 3/3 失败（内存分配）：%@", e3.localizedDescription);
+                    } else {
+                        DSHLog(@"自检 3/3 通过：分配 %@ 项", r3 ?: @"nil");
+                    }
+                }];
+            }];
         }];
     });
 }
@@ -335,6 +364,19 @@ static void DSHLog(NSString *fmt, ...) {
 }
 
 - (void)startKernel {
+    // 防重入：viewDidLoad 和回前台通知都可能调用，
+    // 之前日志里出现两个 pid 抢 3080 就是重入导致的。
+    static BOOL starting = NO;
+    if (starting) {
+        DSHLog(@"startKernel 重入，忽略");
+        return;
+    }
+    starting = YES;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
+                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        starting = NO;
+    });
+
     // 先判断「已经在跑的那个内核是不是当前这一版」。
     //
     // 之前的做法是无条件杀掉所有内核再起新的 —— 每次打开 App 都重启内核，
