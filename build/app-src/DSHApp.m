@@ -191,7 +191,44 @@ static void DSHLog(NSString *fmt, ...) {
 
 #pragma mark 起内核
 
+/// 当前装的版本（deb payload 里的 VERSION 戳）
+- (nullable NSString *)installedVersion {
+    for (NSString *p in @[ [kInstall stringByAppendingPathComponent:@"VERSION"],
+                           [kDataRoot stringByAppendingPathComponent:@"config/installed.version"] ]) {
+        NSString *v = [NSString stringWithContentsOfFile:p
+                                                encoding:NSUTF8StringEncoding error:NULL];
+        v = [v stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (v.length > 0) return v;
+    }
+    return nil;
+}
+
 - (void)startKernel {
+    // 先判断「已经在跑的那个内核是不是当前这一版」。
+    //
+    // 之前的做法是无条件杀掉所有内核再起新的 —— 每次打开 App 都重启内核，
+    // 进行中的任务全丢。而如果反过来完全不管，升级后旧内核会一直占着 3080，
+    // 表现就是「更新了但没生效」。
+    //
+    // 正确做法：版本一致就复用，不一致才停掉重开。
+    NSString *installed = [self installedVersion];
+    pid_t running = [DSHProc kernelPid];
+    BOOL alive = (running > 0) && (kill(running, 0) == 0);
+
+    if (alive) {
+        NSString *runningVer = [DSHProc recordedKernelVersion];
+        if (installed.length > 0 && runningVer.length > 0
+            && [runningVer isEqualToString:installed]) {
+            DSHLog(@"内核已在运行且版本一致（%@ pid=%d），直接复用", runningVer, running);
+            [self poll];
+            return;
+        }
+        DSHLog(@"内核在跑但版本对不上：跑的是 %@，装的是 %@ —— 停掉重开",
+               runningVer ?: @"(未知)", installed ?: @"(未知)");
+    } else if (installed.length > 0) {
+        DSHLog(@"没有内核在跑，启动 %@", installed);
+    }
+
     DSHLog(@"启动：先清理旧实例");
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         int killed = [DSHProc killAllKernelsWait:3];
@@ -232,12 +269,8 @@ static void DSHLog(NSString *fmt, ...) {
             DSHLog(@"请求 JIT → %@", jit ? @"成功" : @"失败");
             kill(pid, SIGCONT);
             [DSHProc rememberSpawnedPid:pid];
-            NSString *pf = [kDataRoot stringByAppendingPathComponent:@"config/kernel.pid"];
-            [[NSFileManager defaultManager] createDirectoryAtPath:
-                [kDataRoot stringByAppendingPathComponent:@"config"]
-                                     withIntermediateDirectories:YES attributes:nil error:NULL];
-            [[NSString stringWithFormat:@"%d\n", pid] writeToFile:pf atomically:NO
-                                                        encoding:NSUTF8StringEncoding error:NULL];
+            // pidfile 里同时记下版本，下次启动才能判断「跑的是不是这一版」
+            [DSHProc writeKernelPid:pid version:[self installedVersion]];
         }
 
         dispatch_async(dispatch_get_main_queue(), ^{ [self poll]; });

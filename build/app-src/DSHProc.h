@@ -35,6 +35,13 @@ NS_ASSUME_NONNULL_BEGIN
 /// 从 pidfile 读内核 pid，读不到返回 0。
 + (pid_t)kernelPid;
 
+/// 从 pidfile 第二行读「启动这个内核时装的版本」，读不到返回 nil。
+/// 用来判断「正在跑的内核是不是当前装的这一版」。
++ (nullable NSString *)recordedKernelVersion;
+
+/// 写 pidfile：第一行 pid（dsh-ctl 只读第一行，兼容），第二行版本。
++ (void)writeKernelPid:(pid_t)pid version:(nullable NSString *)version;
+
 /// 校验这个 pid 确实是我们的内核（按可执行路径判断）。
 /// pidfile 可能过期，PID 回收后会指向别的进程 —— 杀之前必须过这一关。
 + (BOOL)isKernelPid:(pid_t)pid;

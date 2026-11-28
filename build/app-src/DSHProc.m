@@ -175,6 +175,26 @@ static NSMutableSet<NSNumber *> *gSpawnedPids(void) {
     }
 }
 
++ (NSString *)recordedKernelVersion {
+    NSString *raw = [NSString stringWithContentsOfFile:kKernelPidFile
+                                              encoding:NSUTF8StringEncoding error:NULL];
+    NSArray *lines = [raw componentsSeparatedByString:@"\n"];
+    if (lines.count < 2) return nil;
+    NSString *v = [lines[1] stringByTrimmingCharactersInSet:
+                   [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    return v.length > 0 ? v : nil;
+}
+
++ (void)writeKernelPid:(pid_t)pid version:(NSString *)version {
+    if (pid <= 0) return;
+    NSString *dir = [kKernelPidFile stringByDeletingLastPathComponent];
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir
+                             withIntermediateDirectories:YES attributes:nil error:NULL];
+    NSString *body = [NSString stringWithFormat:@"%d\n%@\n", pid, version ?: @""];
+    [body writeToFile:kKernelPidFile atomically:NO
+             encoding:NSUTF8StringEncoding error:NULL];
+}
+
 + (NSArray<NSNumber *> *)kernelPids {
     NSMutableArray<NSNumber *> *out = [NSMutableArray array];
     for (NSDictionary *p in [self allProcesses]) {
