@@ -297,6 +297,7 @@ static void DSHAppLog(NSString *fmt, ...) {
 - (void)logSpawnLogTail;
 - (void)showTierPicker;
 - (void)applyTier:(NSString *)tier;
+- (NSString *)probeBestTier;
 - (nullable NSString *)effectiveTierName;
 - (nullable NSString *)bundledNodePath;
 - (void)handleProbeResult:(BOOL)up;
@@ -858,6 +859,44 @@ static NSString *const kDSHDataRoot = @"/var/mobile/Media/deepseek-harness";
 /// V8 后台线程写可执行页 → SIGBUS。代价是性能低、WASM 不可用。
 ///
 /// 这里允许手动覆盖（写 config/tier），或者清掉缓存让它重新探测。
+/// 逐档真跑 smoke.js，选第一个能过的。
+///
+/// 这就是 tier.sh 在命令行里做的事。之前 App 只读缓存、从不探测，
+/// 于是被一次旧探测留下的 nowasm 永久锁在 --jitless 上 ——
+/// 性能白白掉了，而命令行那边一直是好的。
+- (NSString *)probeBestTier {
+    NSString *node = [self bundledNodePath];
+    NSString *smoke = [kDSHInstallDir stringByAppendingPathComponent:@"smoke.js"];
+    if (node.length == 0 || ![[NSFileManager defaultManager] fileExistsAtPath:smoke]) {
+        DSHAppLog(@"档位探测：缺 node 或 smoke.js，保持 nowasm");
+        return @"nowasm";
+    }
+
+    DSHAppLog(@"档位探测开始（每档最多 30 秒）");
+    NSArray<NSString *> *tiers = @[ @"native", @"single", @"balanced", @"safe", @"nowasm" ];
+    for (NSString *t in tiers) {
+        NSMutableArray *args = [NSMutableArray arrayWithArray:[self tierArgsForName:t]];
+        [args addObject:smoke];
+
+        __block int rc = -1;
+        dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+        [DSHShell runAsync:node args:args timeout:25 completion:^(NSString *out, int status) {
+            rc = status;
+            dispatch_semaphore_signal(sem);
+        }];
+        dispatch_semaphore_wait(sem,
+            dispatch_time(DISPATCH_TIME_NOW, (int64_t)(30 * NSEC_PER_SEC)));
+
+        DSHAppLog(@"  档位 %@ → rc=%d", t, rc);
+        if (rc == 0) {
+            DSHAppLog(@"  选中 %@", t);
+            return t;
+        }
+    }
+    DSHAppLog(@"  全部失败，退回 nowasm");
+    return @"nowasm";
+}
+
 - (void)showTierPicker {
     NSString *current = [self effectiveTierName] ?: @"nowasm";
     NSString *source = [self userTierName] ? @"手动指定"
@@ -879,15 +918,20 @@ static NSString *const kDSHDataRoot = @"/var/mobile/Media/deepseek-harness";
             [self applyTier:t];
         }]];
     }
-    [a addAction:[UIAlertAction actionWithTitle:@"重新探测（清缓存）"
+    [a addAction:[UIAlertAction actionWithTitle:@"重新探测（真跑 smoke.js）"
                                           style:UIAlertActionStyleDefault
                                         handler:^(UIAlertAction *_) {
-        NSString *userTier = [kDSHDataRoot stringByAppendingPathComponent:@"config/tier"];
-        NSString *cache = [kDSHDataRoot stringByAppendingPathComponent:@"data/.dsh-tier"];
-        [[NSFileManager defaultManager] removeItemAtPath:userTier error:NULL];
-        [[NSFileManager defaultManager] removeItemAtPath:cache error:NULL];
-        DSHAppLog(@"档位：清掉手动指定与探测缓存，下次启动走默认 nowasm");
-        [self toast:@"缓存已清除。重启内核后生效（下次启动 dsh 会重新探测）"];
+        [self toast:@"正在逐档探测，最多约 2 分钟…"];
+        __weak typeof(self) weakSelf = self;
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            NSString *best = [weakSelf probeBestTier];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                __strong typeof(weakSelf) self = weakSelf;
+                if (!self) return;
+                [self applyTier:best];
+                [self toast:[NSString stringWithFormat:@"探测结果：%@，正在重启内核…", best]];
+            });
+        });
     }]];
     [a addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
 
