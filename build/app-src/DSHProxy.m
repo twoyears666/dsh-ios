@@ -7,6 +7,7 @@
 @property (nonatomic, strong) NSURLSession *session;
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSURLSessionDataTask *> *tasks;
 @property (nonatomic, strong) NSLock *lock;
+@property (nonatomic, assign) NSInteger hits;
 @end
 
 @implementation DSHProxy
@@ -50,6 +51,13 @@
         [self fail:task error:[NSError errorWithDomain:@"dsh.proxy" code:-1
                                               userInfo:@{ NSLocalizedDescriptionKey: @"URL 拼接失败" }]];
         return;
+    }
+
+    // 只记前 8 个请求，避免刷屏；失败全记
+    if (self.hits < 8) {
+        self.hits += 1;
+        if (self.onLog) self.onLog([NSString stringWithFormat:@"代理 ← %@ %@",
+                                    task.request.HTTPMethod ?: @"GET", u.path]);
     }
 
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:target];
@@ -120,6 +128,8 @@
 }
 
 - (void)fail:(id<WKURLSchemeTask>)task error:(NSError *)error {
+    if (self.onLog) self.onLog([NSString stringWithFormat:@"代理 ✗ %@ → %@",
+                                task.request.URL.path, error.localizedDescription]);
     @try {
         [task didFailWithError:error];
     } @catch (NSException *e) {

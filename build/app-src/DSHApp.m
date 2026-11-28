@@ -108,6 +108,7 @@ static void DSHLog(NSString *fmt, ...) {
 /// 当前是否走 dsh:// 代理（YES）还是直接 http（NO）
 @property (nonatomic, assign) BOOL useProxy;
 @property (nonatomic, strong) DSHProxy *proxy;
+@property (nonatomic, assign) NSInteger nativeStatus;
 @end
 
 @implementation DSHWebVC
@@ -192,6 +193,11 @@ static void DSHLog(NSString *fmt, ...) {
     // 绕开「WebKit 网络进程访问不了 127.0.0.1」这个坑。
     self.proxy = [[DSHProxy alloc] init];
     self.proxy.port = kPort.integerValue;
+    __weak typeof(self) weakSelf = self;
+    self.proxy.onLog = ^(NSString *line) {
+        __strong typeof(weakSelf) self = weakSelf;
+        if (self) DSHLog(@"%@", line);
+    };
     [cfg setURLSchemeHandler:self.proxy forURLScheme:[DSHProxy scheme]];
     self.useProxy = YES;
 
@@ -386,6 +392,7 @@ static void DSHLog(NSString *fmt, ...) {
     [[s dataTaskWithURL:url completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
         NSInteger code = [resp isKindOfClass:[NSHTTPURLResponse class]]
                        ? ((NSHTTPURLResponse *)resp).statusCode : -1;
+        self.nativeStatus = code;
         DSHLog(@"原生 GET / → HTTP %ld, %lu 字节, err=%@",
                (long)code, (unsigned long)data.length, err.localizedDescription ?: @"无");
         if (data.length > 0) {
@@ -433,10 +440,11 @@ static void DSHLog(NSString *fmt, ...) {
          "<p>内核在监听 <code>127.0.0.1:%@</code>，但这个 WebView 收不到响应。</p>"
          "<p>WebView isLoading = %d</p>"
          "<p>dsh:// 代理和直连 http 都试过了</p>"
+         "<p>原生 GET / 返回 HTTP %ld</p>"
          "<p>可能原因：WKWebView 的网络进程访问不了回环地址。</p>"
          "<p><button onclick=\"location.href='http://127.0.0.1:%@/'\" "
          "style='font-size:16px;padding:10px 18px'>重试</button></p>"
-         "</body>", kPort, self.web.isLoading, kPort];
+         "</body>", kPort, self.web.isLoading, self.nativeStatus, kPort];
     [self.web loadHTMLString:html baseURL:nil];
 }
 

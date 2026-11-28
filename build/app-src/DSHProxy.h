@@ -33,6 +33,9 @@ NS_ASSUME_NONNULL_BEGIN
 /// 转发目标端口，默认 3080
 @property (nonatomic, assign) NSInteger port;
 
+/// 日志回调（由外壳接到 minimal.log）
+@property (nonatomic, copy, nullable) void (^onLog)(NSString *line);
+
 @end
 
 NS_ASSUME_NONNULL_END

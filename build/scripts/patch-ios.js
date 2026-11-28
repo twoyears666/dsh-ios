@@ -127,8 +127,15 @@ PATCHES.push({
   new: `\tauthorizeIndex(req, res, secure = false) {
 \t\t// dsh-iOS: 回环免 token。移植版是本机 WebView 外壳，
 \t\t// token 只对远程访问有意义；回环上再要 token 只会让 App 抓 token 失败。
+\t\t//
+\t\t// 两个判据：
+\t\t//   1) socket 的 remoteAddress（最可靠）
+\t\t//   2) Host 头兜底 —— 真机上 dsh 的 web server 适配层没有把 socket
+\t\t//      透传进来，remoteAddress 恒为 undefined，只看它的话永远 401。
 \t\tconst _ra = req.socket?.remoteAddress;
 \t\tif (_ra === "127.0.0.1" || _ra === "::1" || _ra === "::ffff:127.0.0.1") return true;
+\t\tconst _h = String(req.headers?.host ?? "").toLowerCase();
+\t\tif (_h.startsWith("127.0.0.1") || _h.startsWith("localhost") || _h.startsWith("[::1]")) return true;
 \t\t/* v8 ignore next -- node:http always supplies url on server requests. */`,
   marker: 'dsh-iOS: 回环免 token。移植版是本机 WebView 外壳',
   check: 'esm',
@@ -144,6 +151,8 @@ PATCHES.push({
 \t\t// 返回 browserPeer，等价于「浏览器带着有效 cookie 进来了」。
 \t\tconst _ra = request.socket?.remoteAddress;
 \t\tif (_ra === "127.0.0.1" || _ra === "::1" || _ra === "::ffff:127.0.0.1") return { peer: this.browserPeer };
+\t\tconst _h = String(request.headers?.host ?? "").toLowerCase();
+\t\tif (_h.startsWith("127.0.0.1") || _h.startsWith("localhost") || _h.startsWith("[::1]")) return { peer: this.browserPeer };
 \t\tconst secure = this.owner.get("webServer")?.protocol === "https:";`,
   marker: 'dsh-iOS: 回环免 token（与 authorizeIndex 同一判据）',
   check: 'esm',
