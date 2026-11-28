@@ -28,6 +28,15 @@ pkill -f "$KERNEL_ARGV" 2>/dev/null || true
 pkill -f "$JB/usr/bin/dsh web" 2>/dev/null || true
 rm -f "$ROOT/config/kernel.pid" 2>/dev/null || true
 
+# 清掉全屏 Web Clip（只删指向本端口的，用户其它 Web Clip 不碰）
+for d in /var/mobile/Library/WebClips/*.webclip; do
+    [ -d "$d" ] || continue
+    [ -f "$d/Info.plist" ] || continue
+    if grep -q "127.0.0.1:3080" "$d/Info.plist" 2>/dev/null; then
+        rm -rf "$d" 2>/dev/null || true
+    fi
+done
+
 echo ""
 echo "已卸载 DeepSeek Harness。"
 echo "用户数据保留在 /var/mobile/Media/deepseek-harness"

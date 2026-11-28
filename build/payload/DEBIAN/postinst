@@ -193,4 +193,44 @@ mkdir -p "$ROOT/logs" 2>/dev/null || true
     echo
 } >>"$INSTALL_LOG" 2>&1 || true
 
+# ============================================================
+# 全屏 Web Clip 入口（真正的全屏，无 Safari 顶栏）
+#
+# SFSafariViewController 有顶栏/关闭按钮，去不掉（系统硬限制）。
+# 参考 yitenchen123/dsh-ios：真正的全屏入口是 FullScreen=true 的 Web Clip，
+# 有独立桌面图标，URL 写死带 token。
+# 内核由 App 起（本机 launchd 不 spawn），App 用 POSIX_SPAWN_SETSID 让内核
+# 脱离自己常驻 —— 所以点 Web Clip 图标时内核还在，直接全屏显示。
+# ============================================================
+{
+    echo "=== $(date '+%Y-%m-%d %H:%M:%S') 安装全屏 Web Clip ==="
+    WCSRC="$D/webclip"
+    WCDIR="/var/mobile/Library/WebClips/088eff62-d638-4ffc-86c4-72e96cfd96b1.webclip"
+    WCLIB=$(dirname "$WCDIR")
+
+    # 清理旧的指向本端口的 DSH Web Clip（无 token / 旧 token / 缓存）
+    # 只删 URL 含 127.0.0.1:3080 的，用户其它 Web Clip 不碰
+    if [ -d "$WCLIB" ]; then
+        for d in "$WCLIB"/*.webclip; do
+            [ -d "$d" ] || continue
+            [ -f "$d/Info.plist" ] || continue
+            if grep -q "127.0.0.1:3080" "$d/Info.plist" 2>/dev/null; then
+                rm -rf "$d" 2>/dev/null || true
+            fi
+        done
+    fi
+
+    if [ -f "$WCSRC/Info.plist" ]; then
+        mkdir -p "$WCDIR" 2>/dev/null || true
+        cp "$WCSRC/Info.plist" "$WCDIR/Info.plist" 2>/dev/null || true
+        cp "$WCSRC/icon.png" "$WCDIR/icon.png" 2>/dev/null || true
+        cp "$WCSRC/icon.png" "$WCDIR/Icon.png" 2>/dev/null || true
+        chown -R 501:501 "$WCDIR" 2>/dev/null || true
+        echo "Web Clip 已安装: $WCDIR"
+    else
+        echo "找不到 Web Clip 模板 $WCSRC/Info.plist，跳过"
+    fi
+    echo
+} >>"$INSTALL_LOG" 2>&1 || true
+
 exit 0
