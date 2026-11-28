@@ -27,6 +27,7 @@
 #import "DSHProc.h"
 #import "DSHJIT.h"
 #import "DSHPicker.h"
+#import "DSHProxy.h"
 
 static NSString *const kJB       = @"/var/jb";
 static NSString *const kInstall  = @"/var/jb/usr/lib/dsh";
@@ -104,6 +105,9 @@ static void DSHLog(NSString *fmt, ...) {
 @property (nonatomic, strong) DSHPicker *picker;
 /// 主文档是否已经加载完成（用于 15 秒看门狗）
 @property (nonatomic, assign) BOOL finished;
+/// 当前是否走 dsh:// 代理（YES）还是直接 http（NO）
+@property (nonatomic, assign) BOOL useProxy;
+@property (nonatomic, strong) DSHProxy *proxy;
 @end
 
 @implementation DSHWebVC
@@ -183,6 +187,13 @@ static void DSHLog(NSString *fmt, ...) {
         [[WKUserScript alloc] initWithSource:[DSHPicker userScriptSource]
                                injectionTime:WKUserScriptInjectionTimeAtDocumentStart
                             forMainFrameOnly:YES]];
+
+    // 注册 dsh:// —— 页面和所有子资源都走 App 自己的网络栈，
+    // 绕开「WebKit 网络进程访问不了 127.0.0.1」这个坑。
+    self.proxy = [[DSHProxy alloc] init];
+    self.proxy.port = kPort.integerValue;
+    [cfg setURLSchemeHandler:self.proxy forURLScheme:[DSHProxy scheme]];
+    self.useProxy = YES;
 
     self.web = [[WKWebView alloc] initWithFrame:CGRectZero configuration:cfg];
     self.web.navigationDelegate = self;
@@ -388,9 +399,10 @@ static void DSHLog(NSString *fmt, ...) {
 }
 
 - (void)load {
-    NSURL *url = [NSURL URLWithString:
-                  [NSString stringWithFormat:@"http://127.0.0.1:%@/", kPort]];
-    DSHLog(@"loadRequest %@", url);
+    NSURL *url = self.useProxy
+        ? [DSHProxy entryURL]
+        : [NSURL URLWithString:[NSString stringWithFormat:@"http://127.0.0.1:%@/", kPort]];
+    DSHLog(@"loadRequest %@（%@）", url, self.useProxy ? @"dsh:// 代理" : @"直连 http");
     [self.web loadRequest:[NSURLRequest requestWithURL:url
                                            cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
                                        timeoutInterval:30]];
@@ -401,6 +413,13 @@ static void DSHLog(NSString *fmt, ...) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(15 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         if (self.finished) return;
+        if (self.useProxy) {
+            DSHLog(@"⚠ dsh:// 代理 15 秒未完成，改试直连 http");
+            self.useProxy = NO;
+            self.finished = NO;
+            [self load];
+            return;
+        }
         DSHLog(@"⚠ 15 秒仍未完成（isLoading=%d），显示诊断页", self.web.isLoading);
         [self showDiagnosticPage];
     });
@@ -413,6 +432,7 @@ static void DSHLog(NSString *fmt, ...) {
          "<h3>页面没有加载出来</h3>"
          "<p>内核在监听 <code>127.0.0.1:%@</code>，但这个 WebView 收不到响应。</p>"
          "<p>WebView isLoading = %d</p>"
+         "<p>dsh:// 代理和直连 http 都试过了</p>"
          "<p>可能原因：WKWebView 的网络进程访问不了回环地址。</p>"
          "<p><button onclick=\"location.href='http://127.0.0.1:%@/'\" "
          "style='font-size:16px;padding:10px 18px'>重试</button></p>"

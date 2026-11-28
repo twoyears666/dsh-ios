@@ -81,6 +81,7 @@ SOURCES=(
     "$SRC/DSHProc.m"
     "$SRC/DSHJIT.m"
     "$SRC/DSHPicker.m"
+    "$SRC/DSHProxy.m"
 )
 
 for f in "${SOURCES[@]}"; do
