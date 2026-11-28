@@ -239,6 +239,12 @@ jobs:
           install -m 755 build/work/dl/node24-ios "$JB/usr/lib/dsh/bin/node"
           cp -R build/work/npm/node_modules "$JB/usr/lib/dsh/"
           install -m 644 build/shims/ios-image-shim.mjs "$JB/usr/lib/dsh/ios-image-shim.mjs"
+
+          # 前端产物降级：class static blocks 需要 Safari 16.4+，
+          # 老 WebKit 解析到这个语法直接白屏（且 window.onerror 抓不到）。
+          # 真机上 Safari/WKWebView 白屏、Renard(Gecko) 正常，就是这个原因。
+          node build/scripts/patch-web-frontend.js \
+              "$JB/usr/lib/dsh/node_modules/@deepseek-ai/dsh-web-frontend/dist"
           find "$JB" -name '*.node' -delete
 
           # 版本戳：App / dsh-ctl 靠它判断「跑着的内核是不是当前装的版本」。
