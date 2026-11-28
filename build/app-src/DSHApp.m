@@ -391,11 +391,16 @@ static void DSHLog(NSString *fmt, ...) {
 }
 
 - (nullable NSString *)nodePath {
+    // 用 fileExists 而不是 access(X_OK)。
+    //
+    // 容器化之后（container-required=true）access(X_OK) 在 /var/jb 上
+    // 会返回失败 —— 但文件确实在、而且之前实测 posix_spawn 能跑（rc=0）。
+    // 「能不能执行」交给 posix_spawn 去判断，这里只负责找到路径。
     NSString *inBundle = [[[NSBundle mainBundle] bundlePath]
                           stringByAppendingPathComponent:@"runtime/node"];
-    if (access(inBundle.fileSystemRepresentation, X_OK) == 0) return inBundle;
+    if ([[NSFileManager defaultManager] fileExistsAtPath:inBundle]) return inBundle;
     NSString *legacy = [kInstall stringByAppendingPathComponent:@"bin/node"];
-    if (access(legacy.fileSystemRepresentation, X_OK) == 0) return legacy;
+    if ([[NSFileManager defaultManager] fileExistsAtPath:legacy]) return legacy;
     return nil;
 }
 
