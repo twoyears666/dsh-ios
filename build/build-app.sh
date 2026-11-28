@@ -61,6 +61,8 @@ LDFLAGS=(
     -framework UIKit
     -framework Foundation
     -framework WebKit
+    # SFSafariViewController 在 SafariServices framework 里
+    -framework SafariServices
     -framework CoreGraphics
     -framework UniformTypeIdentifiers
     # 语音输入（SFSpeechRecognizer）：录音走 AVAudioEngine，识别走 Speech
