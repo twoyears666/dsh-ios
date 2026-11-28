@@ -4,10 +4,21 @@
 #import "DSHJIT.h"
 
 #import <dlfcn.h>
-#import <sys/ptrace.h>
 #import <signal.h>
 #import <errno.h>
 #import <string.h>
+#import <sys/types.h>
+
+// iOS SDK 不提供 <sys/ptrace.h>，但 libsystem 里有 ptrace 的实现。
+// 手动声明即可（PT_TRACE_ME = 0 是 BSD 的固定值）。
+#if __has_include(<sys/ptrace.h>)
+#import <sys/ptrace.h>
+#else
+#ifndef PT_TRACE_ME
+#define PT_TRACE_ME 0
+#endif
+extern int ptrace(int request, pid_t pid, caddr_t addr, int data);
+#endif
 
 // 不同越狱/不同版本暴露的库路径
 static const char *kLibCandidates[] = {
